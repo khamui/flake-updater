@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { configAttr } from "../discovery/discover.js";
 import { capture, run } from "../nix/exec.js";
@@ -18,6 +18,15 @@ export interface RunRecord {
   failures?: number;
   detail?: string;
 }
+
+/** Written by the agent after a green run; the switch service re-checks everything in it. */
+export interface SwitchRequest {
+  commit: string;
+  branch: string;
+  at: string;
+}
+
+export const requestPath = (stateDir: string) => join(stateDir, "switch-request.json");
 
 /** The agent's own clone, inside its state dir. */
 export const cloneDir = (stateDir: string) => join(stateDir, "repo");
@@ -135,6 +144,10 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
     await git.run("commit", "-m", `flake.lock: update ${inputs.join(", ")}\n\n${summary(probes)}`);
     const commit = await git.run("rev-parse", "HEAD");
     deps.out(`${branch} ${commit.slice(0, 12)}: ${failures.length ? `${failures.length} probe failures` : "probes green"}\n`);
+    if (!failures.length) {
+      const req: SwitchRequest = { commit, branch, at };
+      await writeFile(requestPath(stateDir), JSON.stringify(req) + "\n");
+    }
     return {
       at,
       status: failures.length ? "probes-red" : "green",

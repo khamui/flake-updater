@@ -11,6 +11,8 @@ import { preflight, realPreflight } from "../preflight/preflight.js";
 import { StateStore, defaultStateDir } from "../preflight/state.js";
 import { loadConfig } from "../run/config.js";
 import { updateRun } from "../run/update.js";
+import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
+import { decideMode, realDeps, switchService } from "../switch/switch.js";
 
 const HELP = `Usage: flake-agent <command> [options]
 
@@ -22,6 +24,9 @@ Commands:
   retry       After a failed preflight: preflight again, then run
   skip        Dismiss a failed run; wait for the next cycle
   status      Preflight state and pending choice
+  switch      (root) Guard, build and switch/boot the commit the agent requested
+  activate <toplevel>  (root) Set the system profile to <toplevel> and switch or boot
+  gc          (root) nix-collect-garbage that keeps the newest --keep-system generations
 
 Options:
   --repo <path>     Config repo (default: current directory)
@@ -39,6 +44,9 @@ Options:
   --min-free-gb <n> Free space needed on /nix (default: 10)
   --config <file>   Agent config (JSON, written by the NixOS module)
   --no-preflight    Skip preflight (testing the AI-free run only)
+  --dry-run         switch: guard, build and decide, but don't apply
+  --delete-older-than <n>d  gc: like nix-collect-garbage
+  --keep-system <n> gc: system generations always kept (default: 5)
   -h, --help        Show this help
 
 Custom T2 validators: <repo>/.flake-agent/probes/<program>.sh, run when
@@ -66,6 +74,10 @@ async function main(argv: string[]): Promise<number> {
       "min-free-gb": { type: "string" },
       config: { type: "string" },
       "no-preflight": { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      "switch-state-dir": { type: "string" },
+      "delete-older-than": { type: "string" },
+      "keep-system": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -104,6 +116,36 @@ async function main(argv: string[]): Promise<number> {
         diffLimit: values["diff-limit"] ? Number(values["diff-limit"]) : undefined,
         selfInput: values["self-input"],
       });
+    case "switch": {
+      const cfg = await loadConfig(values.config, { host: values.host, user: values.user });
+      const agentState = values["state-dir"] ?? "/var/lib/flake-agent";
+      const switchState = values["switch-state-dir"] ?? defaultStateDir().replace(/flake-agent$/, "flake-agent-switch");
+      const out = (text: string) => process.stdout.write(text);
+      const record = await switchService(cfg, agentState, switchState, realDeps(cfg, out), { dryRun: values["dry-run"] });
+      return !record || record.result === "switched" || record.result === "dry-run" ? 0 : 1;
+    }
+    case "activate": {
+      const toplevel = positionals[1];
+      if (!toplevel) {
+        process.stderr.write("activate: missing <toplevel>\n");
+        return 2;
+      }
+      const out = (text: string) => process.stdout.write(text);
+      const deps = realDeps({} as never, out);
+      const mode = await decideMode(deps.current, toplevel);
+      const from = (await listGenerations(SYSTEM_PROFILE)).current;
+      const applied = await deps.apply(toplevel, mode);
+      const to = (await listGenerations(SYSTEM_PROFILE)).current;
+      out(`${applied.ok ? mode : `${mode} failed, rolled back`}: generation ${from ?? "none"} → ${to}\n`);
+      return applied.ok ? 0 : 1;
+    }
+    case "gc":
+      await collectGarbage({
+        age: values["delete-older-than"],
+        keepSystem: values["keep-system"] ? Number(values["keep-system"]) : 5,
+        out: (text) => process.stdout.write(text),
+      });
+      return 0;
     case "run":
     case "retry":
     case "skip":

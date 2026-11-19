@@ -141,6 +141,9 @@ in {
   };
 
   config = mkIf cfg.enable {
+    # the CLI: status, retry, skip, probe, …
+    environment.systemPackages = [cfg.package];
+
     users.users.flake-agent = {
       isSystemUser = true;
       group = "flake-agent";
@@ -187,6 +190,34 @@ in {
         LockPersonality = true;
       };
     };
+
+    # Root, no AI: re-runs the guard on the exact commit the agent asked for,
+    # builds it and switches (or sets the boot entry). Idle gating comes with #12.
+    systemd.services.flake-agent-switch = {
+      description = "flake-agent switch (guard, build, activate)";
+      path = [config.nix.package];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${lib.getExe cfg.package} switch --config ${agentConfig} --state-dir ${stateDir} --switch-state-dir /var/lib/flake-agent-switch";
+        StateDirectory = "flake-agent-switch";
+        StateDirectoryMode = "0700";
+        # a switch can take long, and must not be killed half-way
+        TimeoutStartSec = "3h";
+      };
+    };
+
+    systemd.paths.flake-agent-switch = {
+      description = "flake-agent switch request";
+      wantedBy = ["paths.target"];
+      pathConfig.PathExists = "${stateDir}/switch-request.json";
+    };
+
+    # Retention: GC never deletes the newest minGenerations system generations.
+    systemd.services.nix-gc = mkIf config.nix.gc.automatic {
+      path = [config.nix.package];
+      script = lib.mkForce "exec ${lib.getExe cfg.package} gc ${config.nix.gc.options} --keep-system ${toString cfg.minGenerations}";
+    };
+    boot.loader.systemd-boot.configurationLimit = lib.mkDefault 10;
 
     systemd.timers.flake-agent = {
       description = "flake-agent update schedule";
