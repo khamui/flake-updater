@@ -7,6 +7,7 @@ import { run } from "../nix/exec.js";
 import { nixStore } from "../nix/store.js";
 import { diffT0, snapshotT0, type Finding } from "../probes/t0.js";
 import { writeSnapshot } from "../probes/snapshots.js";
+import { diffT1, snapshotT1 } from "../probes/t1.js";
 
 const HELP = `Usage: flake-agent <command> [options]
 
@@ -67,16 +68,27 @@ async function probe(repo: string, target: Target, against: string, build?: stri
     build ??
     (await run("nix", ["build", "--no-link", "--print-out-paths", configAttr(target, "config.system.build.toplevel")])).trim();
 
-  const [oldSnap, newSnap] = await Promise.all([
+  const [oldT0, newT0, oldT1, newT1] = await Promise.all([
     snapshotT0(nixStore, against, target.user),
     snapshotT0(nixStore, toplevel, target.user),
+    snapshotT1(nixStore, against, target.user),
+    snapshotT1(nixStore, toplevel, target.user),
   ]);
 
-  const findings = diffT0(oldSnap, newSnap);
-  const file = await writeSnapshot(repo, target.host, "t0", newSnap);
+  const findings = diffT0(oldT0, newT0);
+  // a manual probe has no agent commits to attribute T1 changes to
+  const changes = await diffT1(oldT1, newT1);
+  const files = [
+    await writeSnapshot(repo, target.host, "t0", newT0),
+    await writeSnapshot(repo, target.host, "t1", newT1),
+  ];
 
-  process.stdout.write(`old: ${against}\nnew: ${toplevel}\nsnapshot: ${file}\n\n`);
-  process.stdout.write(formatFindings(findings));
+  process.stdout.write(`old: ${against}\nnew: ${toplevel}\nsnapshots: ${files.join(", ")}\n\n`);
+  process.stdout.write(formatFindings("T0", findings));
+  process.stdout.write("\n" + formatFindings("T1", changes));
+  for (const c of changes) {
+    if (c.detail) process.stdout.write(`\n--- ${c.subject}\n${c.detail}\n`);
+  }
 
   try {
     process.stdout.write("\n" + (await run("nvd", ["diff", against, toplevel])));
@@ -86,10 +98,14 @@ async function probe(repo: string, target: Target, against: string, build?: stri
   return findings.some((f) => f.severity === "fail") ? 1 : 0;
 }
 
-function formatFindings(findings: Finding[]): string {
-  if (findings.length === 0) return "T0: no differences\n";
+function formatFindings(tier: string, findings: Finding[]): string {
+  if (findings.length === 0) return `${tier}: no differences\n`;
   return findings
-    .map((f) => `${f.severity === "fail" ? "✗" : "·"} ${f.kind.padEnd(16)} ${f.subject}  ${f.detail}`)
+    .map((f) => {
+      // multi-line details (content diffs) are printed separately
+      const detail = f.detail.includes("\n") ? "" : `  ${f.detail}`;
+      return `${f.severity === "fail" ? "✗" : "·"} ${f.kind.padEnd(16)} ${f.subject}${detail}`;
+    })
     .join("\n") + "\n";
 }
 

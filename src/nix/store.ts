@@ -1,4 +1,4 @@
-import { readdir, readlink, realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, readlink, realpath } from "node:fs/promises";
 import { run } from "./exec.js";
 
 /** The store operations probes need; injectable for tests. */
@@ -8,6 +8,9 @@ export interface Store {
   list(dir: string): Promise<string[]>;
   /** Fully resolved target of a path. */
   resolve(path: string): Promise<string>;
+  /** Kind of a path, without following a final symlink. */
+  kind(path: string): Promise<"file" | "dir" | "symlink" | "missing">;
+  read(path: string): Promise<Buffer>;
 }
 
 export const nixStore: Store = {
@@ -30,4 +33,13 @@ export const nixStore: Store = {
       return readlink(path);
     }
   },
+  async kind(path) {
+    try {
+      const st = await lstat(path);
+      return st.isSymbolicLink() ? "symlink" : st.isDirectory() ? "dir" : "file";
+    } catch {
+      return "missing";
+    }
+  },
+  read: (path) => readFile(path),
 };

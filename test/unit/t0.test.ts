@@ -26,6 +26,8 @@ function fakeStore(): Store {
     references: async (path) => refs[path] ?? [],
     list: async (dir) => dirs[dir] ?? [],
     resolve: async (path) => links[path] ?? path,
+    kind: async () => "missing",
+    read: async () => Buffer.alloc(0),
   };
 }
 
