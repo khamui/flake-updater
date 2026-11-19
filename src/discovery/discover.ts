@@ -39,9 +39,10 @@ export function discoveryExpr(user: string): string {
     ++ (if hm ? "${user}" then map (info "home") hm."${user}".home.packages else [])`;
 }
 
-export function configAttr(target: Target, attr: string): string {
+/** Flake ref of the host configuration, or of `attr` inside it. */
+export function configAttr(target: Target, attr = ""): string {
   if (!HOST_NAME.test(target.host)) throw new Error(`invalid host name: ${target.host}`);
-  return `${target.flake}#nixosConfigurations.${target.host}.${attr}`;
+  return `${target.flake}#nixosConfigurations.${target.host}${attr ? `.${attr}` : ""}`;
 }
 
 export function parseDiscovery(json: string): DeclaredPackage[] {

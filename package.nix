@@ -4,6 +4,8 @@
   nodejs_22,
   makeWrapper,
   nvd,
+  git,
+  gnutar,
   diffutils,
   bubblewrap,
   xvfb,
@@ -38,7 +40,7 @@ buildNpmPackage {
   # nix itself is not wrapped: the host's nix must match its daemon
   postInstall = ''
     wrapProgram $out/bin/flake-agent \
-      --prefix PATH : ${lib.makeBinPath [nvd diffutils bubblewrap xvfb]}
+      --prefix PATH : ${lib.makeBinPath [nvd git gnutar diffutils bubblewrap xvfb]}
   '';
 
   meta = {
