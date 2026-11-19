@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { configAttr } from "../discovery/discover.js";
 import { run } from "../nix/exec.js";
 import { GUARD_NIX } from "./expr.js";
+import { diffSizeViolations, lockViolations, writeScopeViolations, type FileChange, type WriteScope } from "./structure.js";
 
 export type Guarded = Record<string, unknown>;
 
@@ -22,6 +23,10 @@ export interface GuardOptions {
   rev: string;
   /** Branch the agent branched from (default `main`). */
   mainRef?: string;
+  writeScope?: Partial<WriteScope>;
+  diffLimit?: number;
+  /** Input name of flake-updater itself (default `flake-updater`). */
+  selfInput?: string;
 }
 
 const MAX_REASONS = 50;
@@ -142,15 +147,41 @@ async function checkout(repo: string, rev: string, dir: string): Promise<void> {
   await rm(tar);
 }
 
+/** Content of `path` at `rev`, or null if it doesn't exist there. */
+async function fileAt(repo: string, rev: string, path: string): Promise<string | null> {
+  try {
+    return await run("git", ["-C", repo, "show", `${rev}:${path}`]);
+  } catch {
+    return null;
+  }
+}
+
+/** Write scope, inputs block, lock integrity and diff size of base..rev. */
+export async function structuralReasons(opts: GuardOptions, base: string, rev: string): Promise<string[]> {
+  const names = (await run("git", ["-C", opts.repo, "diff", "--no-renames", "--name-only", "-z", base, rev])).split("\0").filter(Boolean);
+  const changes: FileChange[] = await Promise.all(
+    names.map(async (path) => ({ path, before: await fileAt(opts.repo, base, path), after: await fileAt(opts.repo, rev, path) })),
+  );
+  const reasons = writeScopeViolations(changes, opts.writeScope);
+
+  const lock = changes.find((c) => c.path === "flake.lock");
+  if (lock) reasons.push(...lockViolations(lock.before ?? "{}", lock.after ?? "{}", opts.selfInput));
+
+  const numstat = await run("git", ["-C", opts.repo, "diff", "--no-renames", "--numstat", base, rev]);
+  reasons.push(...diffSizeViolations(numstat, opts.diffLimit));
+  return reasons;
+}
+
 /**
- * Compare (baseline + new lock) with (agent rev) on the guarded options.
- * The baseline is where the agent branch left main, so edits of mine — before
- * the branch point on both sides, after it on neither — never trigger; and
- * both sides share the rev's lock, so upstream changes don't either.
+ * Compare (baseline + new lock) with (agent rev): structure of the diff, then
+ * the guarded options. The baseline is where the agent branch left main, so
+ * edits of mine — before the branch point on both sides, after it on neither —
+ * never trigger; and both sides share the rev's lock, so upstream changes don't either.
  */
 export async function runGuard(opts: GuardOptions): Promise<GuardResult> {
   const rev = await git(opts.repo, "rev-parse", "--verify", `${opts.rev}^{commit}`);
   const base = await git(opts.repo, "merge-base", opts.mainRef ?? "main", rev);
+  const reasons = await structuralReasons(opts, base, rev);
 
   const work = await mkdtemp(join(tmpdir(), "flake-agent-guard-"));
   try {
@@ -160,11 +191,16 @@ export async function runGuard(opts: GuardOptions): Promise<GuardResult> {
     await checkout(opts.repo, rev, revDir);
     await writeFile(join(baseDir, "flake.lock"), await run("git", ["-C", opts.repo, "show", `${rev}:flake.lock`]));
 
-    const [baseline, agent] = await Promise.all([
-      evalGuarded(baseDir, opts.host, opts.user),
-      evalGuarded(revDir, opts.host, opts.user),
-    ]);
-    const reasons = compareGuarded(baseline, agent);
+    try {
+      const [baseline, agent] = await Promise.all([
+        evalGuarded(baseDir, opts.host, opts.user),
+        evalGuarded(revDir, opts.host, opts.user),
+      ]);
+      reasons.push(...compareGuarded(baseline, agent));
+    } catch (err) {
+      // what can't be evaluated can't be checked
+      reasons.push(`eval: ${(err as Error).message.split("\n").slice(-3).join(" ").slice(0, 300)}`);
+    }
     return { verdict: reasons.length ? "block" : "pass", reasons, base, rev };
   } finally {
     await rm(work, { recursive: true, force: true });
