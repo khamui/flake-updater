@@ -31,6 +31,7 @@
     # VM tests: slow without KVM, so not part of `nix flake check`
     legacyPackages = forAll (pkgs: {
       tests.module = import ./nix/test.nix {inherit self pkgs;};
+      tests.switch = import ./nix/switch-test.nix {inherit self pkgs;};
     });
 
     devShells = forAll (pkgs: {
