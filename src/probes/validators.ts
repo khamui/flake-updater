@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
+import { classifyStartup } from "./deep/neovim.js";
 import type { Sandbox } from "./sandbox.js";
 
 export interface ValidatorResult {
@@ -141,12 +142,7 @@ const neovim: Validator = {
   programs: ["neovim", "nvf"],
   async run(sb) {
     const r = await sb.exec("nvim", ["--headless", "+lua io.stdout:write(vim.fn.execute('messages'))", "+qa"]);
-    const errors = lines(r.stderr);
-    const warnings: string[] = [];
-    for (const line of lines(r.stdout)) {
-      if (/^E\d+:|error/i.test(line)) errors.push(line);
-      else if (/warn|deprecat/i.test(line)) warnings.push(line);
-    }
+    const { errors, warnings } = classifyStartup(r.stderr, r.stdout);
     if (r.code !== 0 && errors.length === 0) errors.push(`nvim exited with ${r.code}`);
     return { errors, warnings };
   },
