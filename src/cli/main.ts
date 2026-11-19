@@ -12,12 +12,14 @@ import { diffT2, snapshotT2 } from "../probes/t2.js";
 import { diffT3, selectDeepProbes, snapshotT3 } from "../probes/t3.js";
 import { DEEP_PROBES } from "../probes/deep/index.js";
 import { BUILTIN_VALIDATORS, loadCustomValidators, selectValidators } from "../probes/validators.js";
+import { runGuard, type GuardOptions } from "../guard/guard.js";
 
 const HELP = `Usage: flake-agent <command> [options]
 
 Commands:
   probe       Snapshot the live system and a fresh build, diff them
   discover    List packages the host config declares (JSON)
+  guard <rev> Compare guarded options of <rev> with where it left main; exit 1 = block
 
 Options:
   --repo <path>     Config repo (default: current directory)
@@ -25,6 +27,7 @@ Options:
   --user <name>     User to probe (default: current user)
   --against <path>  Old system toplevel (default: /run/current-system)
   --build <path>    Use this toplevel instead of building the repo
+  --main <ref>      Branch the agent branched from (guard; default: main)
   -h, --help        Show this help
 
 Custom T2 validators: <repo>/.flake-agent/probes/<program>.sh, run when
@@ -41,6 +44,7 @@ async function main(argv: string[]): Promise<number> {
       user: { type: "string" },
       against: { type: "string" },
       build: { type: "string" },
+      main: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -64,6 +68,12 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case "probe":
       return probe(repo, target, values.against ?? "/run/current-system", values.build);
+    case "guard":
+      if (!positionals[1]) {
+        process.stderr.write("guard: missing <rev>\n");
+        return 2;
+      }
+      return guard({ repo, host: target.host, user: target.user, rev: positionals[1], mainRef: values.main });
     default:
       process.stderr.write(`unknown command: ${command}\n\n${HELP}`);
       return 2;
@@ -124,6 +134,18 @@ async function probe(repo: string, target: Target, against: string, build?: stri
     // nvd is wrapped into the package; missing only when run from source
   }
   return [...findings, ...t2, ...t3].some((f) => f.severity === "fail") ? 1 : 0;
+}
+
+async function guard(opts: GuardOptions): Promise<number> {
+  const result = await runGuard(opts);
+  process.stdout.write(`base: ${result.base}
+rev:  ${result.rev}
+
+${result.verdict.toUpperCase()}
+`);
+  for (const reason of result.reasons) process.stdout.write(`  ${reason}
+`);
+  return result.verdict === "pass" ? 0 : 1;
 }
 
 function formatFindings(tier: string, findings: Finding[]): string {
