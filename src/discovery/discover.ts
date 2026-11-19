@@ -60,3 +60,24 @@ export async function discoverPackages(target: Target): Promise<DeclaredPackage[
   ]);
   return parseDiscovery(json);
 }
+
+/** Nix function applied to the host's `config`; names of enabled `programs.*` in NixOS and HM. */
+export function programsExpr(user: string): string {
+  if (!USER_NAME.test(user)) throw new Error(`invalid user name: ${user}`);
+  return `config: let
+    enabled = set: builtins.filter
+      (n: (builtins.tryEval ((set.\${n} or {}).enable or false)).value == true)
+      (builtins.attrNames set);
+    hm = config.home-manager.users or {};
+  in {
+    nixos = enabled config.programs;
+    home = if hm ? "${user}" then enabled hm."${user}".programs else [];
+  }`;
+}
+
+/** Programs enabled in the host config (NixOS or home-manager). */
+export async function discoverPrograms(target: Target): Promise<Set<string>> {
+  const json = await run("nix", ["eval", "--json", configAttr(target, "config"), "--apply", programsExpr(target.user)]);
+  const { nixos, home } = JSON.parse(json) as { nixos: string[]; home: string[] };
+  return new Set([...nixos, ...home]);
+}

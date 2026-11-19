@@ -2,12 +2,14 @@
 import { hostname, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { configAttr, discoverPackages, type Target } from "../discovery/discover.js";
+import { configAttr, discoverPackages, discoverPrograms, type Target } from "../discovery/discover.js";
 import { run } from "../nix/exec.js";
 import { nixStore } from "../nix/store.js";
 import { diffT0, snapshotT0, type Finding } from "../probes/t0.js";
 import { writeSnapshot } from "../probes/snapshots.js";
 import { diffT1, snapshotT1 } from "../probes/t1.js";
+import { diffT2, snapshotT2 } from "../probes/t2.js";
+import { BUILTIN_VALIDATORS, loadCustomValidators, selectValidators } from "../probes/validators.js";
 
 const HELP = `Usage: flake-agent <command> [options]
 
@@ -22,6 +24,9 @@ Options:
   --against <path>  Old system toplevel (default: /run/current-system)
   --build <path>    Use this toplevel instead of building the repo
   -h, --help        Show this help
+
+Custom T2 validators: <repo>/.flake-agent/probes/<program>.sh, run when
+programs.<program>.enable is set (exit non-zero = error, stderr = messages).
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -75,36 +80,48 @@ async function probe(repo: string, target: Target, against: string, build?: stri
     snapshotT1(nixStore, toplevel, target.user),
   ]);
 
+  const validators = selectValidators(await discoverPrograms(target), [
+    ...BUILTIN_VALIDATORS,
+    ...(await loadCustomValidators(repo)),
+  ]);
+  // sequential: validators start servers (Xvfb, tmux) and must not race
+  const oldT2 = await snapshotT2(against, target.user, validators);
+  const newT2 = await snapshotT2(toplevel, target.user, validators);
+
   const findings = diffT0(oldT0, newT0);
   // a manual probe has no agent commits to attribute T1 changes to
   const changes = await diffT1(oldT1, newT1);
+  const t2 = diffT2(oldT2, newT2);
   const files = [
     await writeSnapshot(repo, target.host, "t0", newT0),
     await writeSnapshot(repo, target.host, "t1", newT1),
+    await writeSnapshot(repo, target.host, "t2", newT2),
   ];
 
   process.stdout.write(`old: ${against}\nnew: ${toplevel}\nsnapshots: ${files.join(", ")}\n\n`);
   process.stdout.write(formatFindings("T0", findings));
-  process.stdout.write("\n" + formatFindings("T1", changes));
+  // T1 content diffs are printed below the list
+  process.stdout.write("\n" + formatFindings("T1", changes.map((c) => ({ ...c, detail: "" }))));
   for (const c of changes) {
     if (c.detail) process.stdout.write(`\n--- ${c.subject}\n${c.detail}\n`);
   }
+  process.stdout.write(`\nT2 validators: ${validators.map((v) => v.name).join(", ") || "none"}\n`);
+  process.stdout.write(formatFindings("T2", t2));
 
   try {
     process.stdout.write("\n" + (await run("nvd", ["diff", against, toplevel])));
   } catch {
     // nvd is wrapped into the package; missing only when run from source
   }
-  return findings.some((f) => f.severity === "fail") ? 1 : 0;
+  return [...findings, ...t2].some((f) => f.severity === "fail") ? 1 : 0;
 }
 
 function formatFindings(tier: string, findings: Finding[]): string {
   if (findings.length === 0) return `${tier}: no differences\n`;
   return findings
     .map((f) => {
-      // multi-line details (content diffs) are printed separately
-      const detail = f.detail.includes("\n") ? "" : `  ${f.detail}`;
-      return `${f.severity === "fail" ? "✗" : "·"} ${f.kind.padEnd(16)} ${f.subject}${detail}`;
+      const detail = f.detail ? `  ${f.detail.replace(/\n/g, "\n    ")}` : "";
+      return `${f.severity === "fail" ? "✗" : "·"} ${f.kind.padEnd(17)} ${f.subject}${detail}`;
     })
     .join("\n") + "\n";
 }
