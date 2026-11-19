@@ -13,6 +13,10 @@ import { diffT3, selectDeepProbes, snapshotT3 } from "../probes/t3.js";
 import { DEEP_PROBES } from "../probes/deep/index.js";
 import { BUILTIN_VALIDATORS, loadCustomValidators, selectValidators } from "../probes/validators.js";
 import { runGuard, type GuardOptions } from "../guard/guard.js";
+import { runCycle, skip, status } from "../preflight/cycle.js";
+import { preflight, realPreflight } from "../preflight/preflight.js";
+import { StateStore, defaultStateDir } from "../preflight/state.js";
+import { DEFAULT_MODEL } from "../preflight/subscription.js";
 
 const HELP = `Usage: flake-agent <command> [options]
 
@@ -20,6 +24,10 @@ Commands:
   probe       Snapshot the live system and a fresh build, diff them
   discover    List packages the host config declares (JSON)
   guard <rev> Compare guarded options of <rev> with where it left main; exit 1 = block
+  run         Preflight (credential, subscription, AC, disk, lock), then one update cycle
+  retry       After a failed preflight: preflight again, then run
+  skip        Dismiss a failed run; wait for the next cycle
+  status      Preflight state and pending choice
 
 Options:
   --repo <path>     Config repo (default: current directory)
@@ -31,6 +39,10 @@ Options:
   --allow/--deny <glob>  Write-scope overrides (guard; repeatable)
   --diff-limit <n>  Max changed lines (guard; default: 60)
   --self-input <name>  flake-updater input name (guard; default: flake-updater)
+  --state-dir <dir> State (default: $STATE_DIRECTORY or ~/.local/state/flake-agent)
+  --token-file <f>  Subscription token (else $CREDENTIALS_DIRECTORY/claude-token, $CLAUDE_CODE_OAUTH_TOKEN)
+  --model <id>      Model for the run (default: claude-sonnet-5-5)
+  --min-free-gb <n> Free space needed on /nix (default: 10)
   -h, --help        Show this help
 
 Custom T2 validators: <repo>/.flake-agent/probes/<program>.sh, run when
@@ -52,6 +64,10 @@ async function main(argv: string[]): Promise<number> {
       deny: { type: "string", multiple: true },
       "diff-limit": { type: "string" },
       "self-input": { type: "string" },
+      "state-dir": { type: "string" },
+      "token-file": { type: "string" },
+      model: { type: "string" },
+      "min-free-gb": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -90,6 +106,36 @@ async function main(argv: string[]): Promise<number> {
         diffLimit: values["diff-limit"] ? Number(values["diff-limit"]) : undefined,
         selfInput: values["self-input"],
       });
+    case "run":
+    case "retry":
+    case "skip":
+    case "status": {
+      const state = new StateStore(values["state-dir"] ?? defaultStateDir());
+      const out = (text: string) => process.stdout.write(text);
+      if (command === "skip") return skip(state, out);
+      if (command === "status") return status(state, out);
+      const checks = realPreflight({
+        credentials: {
+          credentialsDir: process.env.CREDENTIALS_DIRECTORY,
+          tokenFile: values["token-file"],
+          envToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+        },
+        model: values.model ?? DEFAULT_MODEL,
+        executable: process.env.FLAKE_AGENT_CLAUDE,
+        stateDir: state.dir,
+        minFreeGB: values["min-free-gb"] ? Number(values["min-free-gb"]) : 10,
+      });
+      return runCycle({
+        state,
+        preflight: () => preflight(checks),
+        // the update run itself lands with the NixOS module (#10)
+        update: async () => {
+          out("Preflight passed.\n");
+          return 0;
+        },
+        out,
+      });
+    }
     default:
       process.stderr.write(`unknown command: ${command}\n\n${HELP}`);
       return 2;
