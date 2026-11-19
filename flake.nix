@@ -5,7 +5,13 @@
 
   outputs = {nixpkgs, ...}: let
     systems = ["x86_64-linux" "aarch64-linux"];
-    forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+    # claude-code (the Agent SDK's runtime) is unfree; allow exactly that package
+    pkgsFor = system:
+      import nixpkgs {
+        inherit system;
+        config.allowUnfreePredicate = p: nixpkgs.lib.getName p == "claude-code";
+      };
+    forAll = f: nixpkgs.lib.genAttrs systems (system: f (pkgsFor system));
   in {
     packages = forAll (pkgs: {
       default = pkgs.callPackage ./package.nix {};

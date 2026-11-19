@@ -9,6 +9,7 @@
   diffutils,
   bubblewrap,
   xvfb,
+  claude-code,
 }:
 buildNpmPackage {
   pname = "flake-agent";
@@ -26,7 +27,7 @@ buildNpmPackage {
   };
 
   nodejs = nodejs_22;
-  npmDepsHash = "sha256-lcCkIKuBLoc0H2lSLp17oxpiqvxaq3SSfjAgF/TOAhE=";
+  npmDepsHash = "sha256-0CzBHiIhh6BD8Cni9EwwwJ0hEMqml6HisUZUd4mlZzk=";
 
   nativeBuildInputs = [makeWrapper];
 
@@ -39,8 +40,11 @@ buildNpmPackage {
 
   # nix itself is not wrapped: the host's nix must match its daemon
   postInstall = ''
+    # the SDK's prebuilt Claude Code binary doesn't run on NixOS; nixpkgs' claude-code is used instead
+    rm -rf $out/lib/node_modules/flake-agent/node_modules/@anthropic-ai/claude-agent-sdk-*
     wrapProgram $out/bin/flake-agent \
-      --prefix PATH : ${lib.makeBinPath [nvd git gnutar diffutils bubblewrap xvfb]}
+      --prefix PATH : ${lib.makeBinPath [nvd git gnutar diffutils bubblewrap xvfb]} \
+      --set-default FLAKE_AGENT_CLAUDE ${lib.getExe claude-code}
   '';
 
   meta = {
