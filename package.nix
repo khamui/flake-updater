@@ -29,7 +29,8 @@ buildNpmPackage {
   nodejs = nodejs_22;
   npmDepsHash = "sha256-0CzBHiIhh6BD8Cni9EwwwJ0hEMqml6HisUZUd4mlZzk=";
 
-  nativeBuildInputs = [makeWrapper];
+  # git: the update-run tests use a real repository
+  nativeBuildInputs = [makeWrapper git];
 
   doCheck = true;
   checkPhase = ''

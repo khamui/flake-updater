@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { RunRecord } from "../run/update.js";
 import type { PreflightFailure } from "./subscription.js";
 
 export interface PreflightRecord {
@@ -12,6 +13,7 @@ export interface RunState {
   preflight?: PreflightRecord;
   /** A failed run waiting for the user's choice: retry now or wait for the next cycle. */
   pending?: { since: string; failure: PreflightFailure };
+  lastRun?: RunRecord;
 }
 
 export class StateStore {

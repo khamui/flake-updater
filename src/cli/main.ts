@@ -2,21 +2,15 @@
 import { hostname, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { configAttr, discoverPackages, discoverPrograms, type Target } from "../discovery/discover.js";
+import { configAttr, discoverPackages, type Target } from "../discovery/discover.js";
+import { formatProbeRun, nvdDiff, probeAll, probeFailures } from "../probes/all.js";
 import { run } from "../nix/exec.js";
-import { nixStore } from "../nix/store.js";
-import { diffT0, snapshotT0, type Finding } from "../probes/t0.js";
-import { writeSnapshot } from "../probes/snapshots.js";
-import { diffT1, snapshotT1 } from "../probes/t1.js";
-import { diffT2, snapshotT2 } from "../probes/t2.js";
-import { diffT3, selectDeepProbes, snapshotT3 } from "../probes/t3.js";
-import { DEEP_PROBES } from "../probes/deep/index.js";
-import { BUILTIN_VALIDATORS, loadCustomValidators, selectValidators } from "../probes/validators.js";
 import { runGuard, type GuardOptions } from "../guard/guard.js";
 import { runCycle, skip, status } from "../preflight/cycle.js";
 import { preflight, realPreflight } from "../preflight/preflight.js";
 import { StateStore, defaultStateDir } from "../preflight/state.js";
-import { DEFAULT_MODEL } from "../preflight/subscription.js";
+import { loadConfig } from "../run/config.js";
+import { updateRun } from "../run/update.js";
 
 const HELP = `Usage: flake-agent <command> [options]
 
@@ -43,6 +37,8 @@ Options:
   --token-file <f>  Subscription token (else $CREDENTIALS_DIRECTORY/claude-token, $CLAUDE_CODE_OAUTH_TOKEN)
   --model <id>      Model for the run (default: claude-sonnet-5-5)
   --min-free-gb <n> Free space needed on /nix (default: 10)
+  --config <file>   Agent config (JSON, written by the NixOS module)
+  --no-preflight    Skip preflight (testing the AI-free run only)
   -h, --help        Show this help
 
 Custom T2 validators: <repo>/.flake-agent/probes/<program>.sh, run when
@@ -68,6 +64,8 @@ async function main(argv: string[]): Promise<number> {
       "token-file": { type: "string" },
       model: { type: "string" },
       "min-free-gb": { type: "string" },
+      config: { type: "string" },
+      "no-preflight": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -114,27 +112,34 @@ async function main(argv: string[]): Promise<number> {
       const out = (text: string) => process.stdout.write(text);
       if (command === "skip") return skip(state, out);
       if (command === "status") return status(state, out);
+      const cfg = await loadConfig(values.config, {
+        repo: values.repo ? repo : undefined,
+        host: values.host,
+        user: values.user,
+        model: values.model,
+        minFreeGB: values["min-free-gb"] ? Number(values["min-free-gb"]) : undefined,
+        against: values.against,
+      });
       const checks = realPreflight({
         credentials: {
           credentialsDir: process.env.CREDENTIALS_DIRECTORY,
           tokenFile: values["token-file"],
           envToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
         },
-        model: values.model ?? DEFAULT_MODEL,
+        model: cfg.model,
         executable: process.env.FLAKE_AGENT_CLAUDE,
+        home: process.env.HOME,
         stateDir: state.dir,
-        minFreeGB: values["min-free-gb"] ? Number(values["min-free-gb"]) : 10,
+        minFreeGB: cfg.minFreeGB,
       });
-      return runCycle({
-        state,
-        preflight: () => preflight(checks),
-        // the update run itself lands with the NixOS module (#10)
-        update: async () => {
-          out("Preflight passed.\n");
-          return 0;
-        },
-        out,
-      });
+      const update = async () => {
+        const record = await updateRun(cfg, state.dir, { out });
+        await state.update((s) => ({ ...s, lastRun: record }));
+        return record.status === "green" || record.status === "up-to-date" ? 0 : 1;
+      };
+      // --no-preflight: exercise the AI-free run without a subscription (testing only)
+      if (values["no-preflight"]) return update();
+      return runCycle({ state, preflight: () => preflight(checks), update, out });
     }
     default:
       process.stderr.write(`unknown command: ${command}\n\n${HELP}`);
@@ -146,56 +151,11 @@ async function probe(repo: string, target: Target, against: string, build?: stri
   const toplevel =
     build ??
     (await run("nix", ["build", "--no-link", "--print-out-paths", configAttr(target, "config.system.build.toplevel")])).trim();
-
-  const [oldT0, newT0, oldT1, newT1] = await Promise.all([
-    snapshotT0(nixStore, against, target.user),
-    snapshotT0(nixStore, toplevel, target.user),
-    snapshotT1(nixStore, against, target.user),
-    snapshotT1(nixStore, toplevel, target.user),
-  ]);
-
-  const programs = await discoverPrograms(target);
-  const validators = selectValidators(programs, [
-    ...BUILTIN_VALIDATORS,
-    ...(await loadCustomValidators(repo)),
-  ]);
-  // sequential: validators start servers (Xvfb, tmux) and must not race
-  const oldT2 = await snapshotT2(against, target.user, validators);
-  const newT2 = await snapshotT2(toplevel, target.user, validators);
-  const deep = selectDeepProbes(programs, DEEP_PROBES);
-  const oldT3 = await snapshotT3(against, target.user, deep);
-  const newT3 = await snapshotT3(toplevel, target.user, deep);
-
-  const findings = diffT0(oldT0, newT0);
-  // a manual probe has no agent commits to attribute T1 changes to
-  const changes = await diffT1(oldT1, newT1);
-  const t2 = diffT2(oldT2, newT2);
-  const t3 = diffT3(oldT3, newT3, deep);
-  const files = [
-    await writeSnapshot(repo, target.host, "t0", newT0),
-    await writeSnapshot(repo, target.host, "t1", newT1),
-    await writeSnapshot(repo, target.host, "t2", newT2),
-    await writeSnapshot(repo, target.host, "t3", newT3),
-  ];
-
-  process.stdout.write(`old: ${against}\nnew: ${toplevel}\nsnapshots: ${files.join(", ")}\n\n`);
-  process.stdout.write(formatFindings("T0", findings));
-  // T1 content diffs are printed below the list
-  process.stdout.write("\n" + formatFindings("T1", changes.map((c) => ({ ...c, detail: "" }))));
-  for (const c of changes) {
-    if (c.detail) process.stdout.write(`\n--- ${c.subject}\n${c.detail}\n`);
-  }
-  process.stdout.write(`\nT2 validators: ${validators.map((v) => v.name).join(", ") || "none"}\n`);
-  process.stdout.write(formatFindings("T2", t2));
-  process.stdout.write(`\nT3 probes: ${deep.map((p) => p.name).join(", ") || "none"}\n`);
-  process.stdout.write(formatFindings("T3", t3));
-
-  try {
-    process.stdout.write("\n" + (await run("nvd", ["diff", against, toplevel])));
-  } catch {
-    // nvd is wrapped into the package; missing only when run from source
-  }
-  return [...findings, ...t2, ...t3].some((f) => f.severity === "fail") ? 1 : 0;
+  const result = await probeAll(repo, target, against, toplevel);
+  process.stdout.write(formatProbeRun(result));
+  const nvd = await nvdDiff(against, toplevel);
+  if (nvd) process.stdout.write(`\n${nvd}`);
+  return probeFailures(result).length ? 1 : 0;
 }
 
 async function guard(opts: GuardOptions): Promise<number> {
@@ -208,16 +168,6 @@ ${result.verdict.toUpperCase()}
   for (const reason of result.reasons) process.stdout.write(`  ${reason}
 `);
   return result.verdict === "pass" ? 0 : 1;
-}
-
-function formatFindings(tier: string, findings: Finding[]): string {
-  if (findings.length === 0) return `${tier}: no differences\n`;
-  return findings
-    .map((f) => {
-      const detail = f.detail ? `  ${f.detail.replace(/\n/g, "\n    ")}` : "";
-      return `${f.severity === "fail" ? "✗" : "·"} ${f.kind.padEnd(17)} ${f.subject}${detail}`;
-    })
-    .join("\n") + "\n";
 }
 
 main(process.argv.slice(2)).then(

@@ -3,7 +3,11 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = {nixpkgs, ...}: let
+  outputs = {
+    self,
+    nixpkgs,
+    ...
+  }: let
     systems = ["x86_64-linux" "aarch64-linux"];
     # claude-code (the Agent SDK's runtime) is unfree; allow exactly that package
     pkgsFor = system:
@@ -20,6 +24,13 @@
     # the package build runs the vitest suite (doCheck)
     checks = forAll (pkgs: {
       default = pkgs.callPackage ./package.nix {};
+    });
+
+    nixosModules.default = import ./nix/module.nix self;
+
+    # VM tests: slow without KVM, so not part of `nix flake check`
+    legacyPackages = forAll (pkgs: {
+      tests.module = import ./nix/test.nix {inherit self pkgs;};
     });
 
     devShells = forAll (pkgs: {
