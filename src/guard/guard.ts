@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { configAttr } from "../discovery/discover.js";
 import { run } from "../nix/exec.js";
 import { GUARD_NIX } from "./expr.js";
+import { flagViolations } from "./flags.js";
 import { diffSizeViolations, lockViolations, writeScopeViolations, type FileChange, type WriteScope } from "./structure.js";
 
 export type Guarded = Record<string, unknown>;
@@ -156,13 +157,13 @@ async function fileAt(repo: string, rev: string, path: string): Promise<string |
   }
 }
 
-/** Write scope, inputs block, lock integrity and diff size of base..rev. */
+/** Write scope, inputs block, lock integrity, code/hash flags and diff size of base..rev. */
 export async function structuralReasons(opts: GuardOptions, base: string, rev: string): Promise<string[]> {
   const names = (await run("git", ["-C", opts.repo, "diff", "--no-renames", "--name-only", "-z", base, rev])).split("\0").filter(Boolean);
   const changes: FileChange[] = await Promise.all(
     names.map(async (path) => ({ path, before: await fileAt(opts.repo, base, path), after: await fileAt(opts.repo, rev, path) })),
   );
-  const reasons = writeScopeViolations(changes, opts.writeScope);
+  const reasons = [...writeScopeViolations(changes, opts.writeScope), ...flagViolations(changes)];
 
   const lock = changes.find((c) => c.path === "flake.lock");
   if (lock) reasons.push(...lockViolations(lock.before ?? "{}", lock.after ?? "{}", opts.selfInput));
