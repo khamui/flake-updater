@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { classifyStartup } from "./deep/neovim.js";
+import type { Captured } from "../nix/exec.js";
 import type { Sandbox } from "./sandbox.js";
 
 export interface ValidatorResult {
@@ -91,32 +92,47 @@ async function withXvfb<T>(fn: (display: string | undefined) => Promise<T>): Pro
   }
 }
 
+/** Alacritty's own config check: `migrate --dry-run`, then a launch under Xvfb for its log. */
+export async function checkAlacritty(sb: Sandbox): Promise<ValidatorResult> {
+  const migrate = await sb.exec("alacritty", ["migrate", "--dry-run"]);
+  const parsed = byExitCode(migrate.code, migrate.code === 0 ? "" : migrate.stderr + migrate.stdout, "alacritty migrate");
+  // config warnings (unknown keys, deprecations) are only logged by a real launch
+  const launch = await withXvfb(async (display) => {
+    if (!display) return { errors: [], warnings: ["Xvfb unavailable: launch check skipped"] };
+    const r = await sb.exec("alacritty", ["-e", "true"], { env: { DISPLAY: display }, timeoutMs: 20_000 });
+    return parseAlacrittyLog(r.stdout + r.stderr);
+  });
+  return merge(parsed, launch);
+}
+
 const alacritty: Validator = {
   name: "alacritty",
   programs: ["alacritty"],
-  async run(sb) {
-    const migrate = await sb.exec("alacritty", ["migrate", "--dry-run"]);
-    const parsed = byExitCode(migrate.code, migrate.code === 0 ? "" : migrate.stderr + migrate.stdout, "alacritty migrate");
-    // config warnings (unknown keys, deprecations) are only logged by a real launch
-    const launch = await withXvfb(async (display) => {
-      if (!display) return { errors: [], warnings: ["Xvfb unavailable: launch check skipped"] };
-      const r = await sb.exec("alacritty", ["-e", "true"], { env: { DISPLAY: display }, timeoutMs: 20_000 });
-      return parseAlacrittyLog(r.stdout + r.stderr);
-    });
-    return merge(parsed, launch);
-  },
+  run: checkAlacritty,
 };
+
+/**
+ * Start a tmux server on its own socket with the user's config, run `fn` against
+ * it (`tmux(...args)` talks to that server), then kill it. Config errors are only
+ * reported for an explicit source-file into a running server.
+ */
+export async function withTmuxServer<T>(
+  sb: Sandbox,
+  fn: (started: Captured, tmux: (...args: string[]) => Promise<Captured>) => Promise<T>,
+): Promise<T> {
+  const conf = (await exists(sb, ".config/tmux/tmux.conf")) ? ".config/tmux/tmux.conf" : ".tmux.conf";
+  const tmux = (...args: string[]) => sb.exec("tmux", ["-L", "probe", ...args]);
+  try {
+    return await fn(await tmux("-f", "/dev/null", "new-session", "-d", ";", "source-file", `${sb.home}/${conf}`), tmux);
+  } finally {
+    await tmux("kill-server");
+  }
+}
 
 const tmux: Validator = {
   name: "tmux",
   programs: ["tmux"],
-  async run(sb) {
-    const conf = (await exists(sb, ".config/tmux/tmux.conf")) ? ".config/tmux/tmux.conf" : ".tmux.conf";
-    // config errors are only reported for an explicit source-file into a running server
-    const r = await sb.exec("tmux", ["-L", "probe", "-f", "/dev/null", "new-session", "-d", ";", "source-file", `${sb.home}/${conf}`]);
-    await sb.exec("tmux", ["-L", "probe", "kill-server"]);
-    return byExitCode(r.code, r.stderr, "tmux");
-  },
+  run: (sb) => withTmuxServer(sb, async (r) => byExitCode(r.code, r.stderr, "tmux")),
 };
 
 const ZSH_FILES = [".zshenv", ".zprofile", ".zshrc", ".zlogin"];
