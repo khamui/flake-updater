@@ -41,42 +41,43 @@ in {
   "users.users" = builtins.mapAttrs (_: u: safe 5 (removeAttrs u ["packages"])) config.users.users;
   "users.groups" = safe 4 config.users.groups;
   "security" = safe 5 config.security;
-  "services.openssh.enable" = config.services.openssh.enable;
+  "services.openssh.enable" = safe 0 config.services.openssh.enable;
   "networking.firewall" = safe 4 config.networking.firewall;
-  "networking.nameservers" = config.networking.nameservers;
+  "networking.nameservers" = safe 1 config.networking.nameservers;
   "networking.wg-quick" = safe 5 config.networking.wg-quick;
-  "systemd.services" = builtins.attrNames config.systemd.services;
-  "systemd.timers" = builtins.attrNames config.systemd.timers;
-  "systemd.user.services" = builtins.attrNames config.systemd.user.services;
+  "systemd.services" = safe 1 (builtins.attrNames config.systemd.services);
+  "systemd.timers" = safe 1 (builtins.attrNames config.systemd.timers);
+  "systemd.user.services" = safe 1 (builtins.attrNames config.systemd.user.services);
   # Not all of boot.*: initrd systemd units hold derivations that can't be forced in isolation.
+  # Every value goes through \`safe\`: options removed upstream throw when read.
   "boot" = let b = config.boot; i = b.initrd; in {
     loader = safe 4 b.loader;
-    kernelParams = b.kernelParams;
-    kernelModules = b.kernelModules;
-    blacklistedKernelModules = b.blacklistedKernelModules;
-    extraModprobeConfig = b.extraModprobeConfig;
+    kernelParams = safe 2 b.kernelParams;
+    kernelModules = safe 2 b.kernelModules;
+    blacklistedKernelModules = safe 2 b.blacklistedKernelModules;
+    extraModprobeConfig = safe 2 b.extraModprobeConfig;
     extraModulePackages = safe 1 b.extraModulePackages;
     sysctl = safe 2 b.kernel.sysctl;
-    postBootCommands = b.postBootCommands;
+    postBootCommands = safe 2 b.postBootCommands;
     binfmt = safe 3 (b.binfmt.registrations or {});
     initrd = {
-      kernelModules = i.kernelModules;
-      availableKernelModules = i.availableKernelModules;
+      kernelModules = safe 2 i.kernelModules;
+      availableKernelModules = safe 2 i.availableKernelModules;
       luks = safe 4 i.luks.devices;
       network = safe 4 i.network;
       secrets = safe 2 i.secrets;
-      preLVMCommands = i.preLVMCommands;
-      postDeviceCommands = i.postDeviceCommands;
-      postMountCommands = i.postMountCommands;
-      systemd = { enable = i.systemd.enable; services = builtins.attrNames i.systemd.services; };
+      preLVMCommands = safe 2 i.preLVMCommands;
+      postDeviceCommands = safe 2 i.postDeviceCommands;
+      postMountCommands = safe 2 i.postMountCommands;
+      systemd = { enable = safe 0 i.systemd.enable; services = safe 1 (builtins.attrNames i.systemd.services); };
     };
   };
   "boot.kernel" = safe 0 config.boot.kernelPackages.kernel;
-  "environment.etc" = builtins.filter (n: etc.\${n}.enable or true) (builtins.attrNames etc);
-  "system.activationScripts" = builtins.mapAttrs (_: s: if builtins.isString s then s else safe 2 (s.text or s)) config.system.activationScripts;
+  "environment.etc" = safe 1 (builtins.filter (n: etc.\${n}.enable or true) (builtins.attrNames etc));
+  "system.activationScripts" = safe 3 (builtins.mapAttrs (_: s: if builtins.isString s then s else safe 2 (s.text or s)) config.system.activationScripts);
   "nixpkgs.overlays" = {
-    count = builtins.length config.nixpkgs.overlays;
-    files = map (d: d.file) options.nixpkgs.overlays.definitionsWithLocations;
+    count = safe 0 (builtins.length config.nixpkgs.overlays);
+    files = safe 1 (map (d: d.file) options.nixpkgs.overlays.definitionsWithLocations);
   };
 
   # Rendered instead of the option tree, so pure renames pass.

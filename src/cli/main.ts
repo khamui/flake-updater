@@ -28,6 +28,9 @@ Options:
   --against <path>  Old system toplevel (default: /run/current-system)
   --build <path>    Use this toplevel instead of building the repo
   --main <ref>      Branch the agent branched from (guard; default: main)
+  --allow/--deny <glob>  Write-scope overrides (guard; repeatable)
+  --diff-limit <n>  Max changed lines (guard; default: 60)
+  --self-input <name>  flake-updater input name (guard; default: flake-updater)
   -h, --help        Show this help
 
 Custom T2 validators: <repo>/.flake-agent/probes/<program>.sh, run when
@@ -45,6 +48,10 @@ async function main(argv: string[]): Promise<number> {
       against: { type: "string" },
       build: { type: "string" },
       main: { type: "string" },
+      allow: { type: "string", multiple: true },
+      deny: { type: "string", multiple: true },
+      "diff-limit": { type: "string" },
+      "self-input": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -73,7 +80,16 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write("guard: missing <rev>\n");
         return 2;
       }
-      return guard({ repo, host: target.host, user: target.user, rev: positionals[1], mainRef: values.main });
+      return guard({
+        repo,
+        host: target.host,
+        user: target.user,
+        rev: positionals[1],
+        mainRef: values.main,
+        writeScope: { allow: values.allow ?? [], deny: values.deny ?? [] },
+        diffLimit: values["diff-limit"] ? Number(values["diff-limit"]) : undefined,
+        selfInput: values["self-input"],
+      });
     default:
       process.stderr.write(`unknown command: ${command}\n\n${HELP}`);
       return 2;
