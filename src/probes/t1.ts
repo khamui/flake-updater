@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
 import { run } from "../nix/exec.js";
 import type { Store } from "../nix/store.js";
+import { homeGeneration } from "../nix/system.js";
 import type { Finding } from "./t0.js";
 
 /** Per-user profiles under /etc are package environments; T0 covers them. */
 const SKIP_ETC = new Set(["profiles"]);
-
-const HM_GENERATION = /\/nix\/store\/[0-9a-z]{32}-home-manager-generation/;
 
 export interface GeneratedFile {
   /** Content hash; for a linked directory, a hash over its whole tree. */
@@ -51,14 +50,6 @@ export type Attribution = { source: "agent"; changeIds: string[] } | { source: "
 
 export interface AttributedChange extends T1Change {
   attribution: Attribution;
-}
-
-/** HM generation of `user` in a system toplevel, read from its activation unit. */
-async function homeGeneration(store: Store, toplevel: string, user: string): Promise<string | undefined> {
-  const unit = `${toplevel}/etc/systemd/system/home-manager-${user}.service`;
-  if ((await store.kind(await store.resolve(unit))) !== "file") return undefined;
-  const text = (await store.read(unit)).toString("utf8");
-  return HM_GENERATION.exec(text)?.[0];
 }
 
 /** Snapshot every generated config file of a system toplevel (live or built). */

@@ -5,6 +5,8 @@
   makeWrapper,
   nvd,
   diffutils,
+  bubblewrap,
+  xvfb,
 }:
 buildNpmPackage {
   pname = "flake-agent";
@@ -36,7 +38,7 @@ buildNpmPackage {
   # nix itself is not wrapped: the host's nix must match its daemon
   postInstall = ''
     wrapProgram $out/bin/flake-agent \
-      --prefix PATH : ${lib.makeBinPath [nvd diffutils]}
+      --prefix PATH : ${lib.makeBinPath [nvd diffutils bubblewrap xvfb]}
   '';
 
   meta = {
