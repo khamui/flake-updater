@@ -52,5 +52,7 @@ export async function status(state: StateStore, out: (text: string) => void): Pr
       : "Preflight: not run yet\n",
   );
   if (s.pending) out(`Pending since ${s.pending.since}: ${s.pending.failure.message}\n${CHOICE}\n`);
+  const r = s.lastRun;
+  if (r) out(`Last run: ${r.status} (${r.at})${r.branch ? ` ${r.branch}` : ""}${r.commit ? ` ${r.commit.slice(0, 12)}` : ""}${r.detail ? ` — ${r.detail}` : ""}\n`);
   return 0;
 }
