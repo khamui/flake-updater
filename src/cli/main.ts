@@ -9,6 +9,8 @@ import { diffT0, snapshotT0, type Finding } from "../probes/t0.js";
 import { writeSnapshot } from "../probes/snapshots.js";
 import { diffT1, snapshotT1 } from "../probes/t1.js";
 import { diffT2, snapshotT2 } from "../probes/t2.js";
+import { diffT3, selectDeepProbes, snapshotT3 } from "../probes/t3.js";
+import { DEEP_PROBES } from "../probes/deep/index.js";
 import { BUILTIN_VALIDATORS, loadCustomValidators, selectValidators } from "../probes/validators.js";
 
 const HELP = `Usage: flake-agent <command> [options]
@@ -80,22 +82,28 @@ async function probe(repo: string, target: Target, against: string, build?: stri
     snapshotT1(nixStore, toplevel, target.user),
   ]);
 
-  const validators = selectValidators(await discoverPrograms(target), [
+  const programs = await discoverPrograms(target);
+  const validators = selectValidators(programs, [
     ...BUILTIN_VALIDATORS,
     ...(await loadCustomValidators(repo)),
   ]);
   // sequential: validators start servers (Xvfb, tmux) and must not race
   const oldT2 = await snapshotT2(against, target.user, validators);
   const newT2 = await snapshotT2(toplevel, target.user, validators);
+  const deep = selectDeepProbes(programs, DEEP_PROBES);
+  const oldT3 = await snapshotT3(against, target.user, deep);
+  const newT3 = await snapshotT3(toplevel, target.user, deep);
 
   const findings = diffT0(oldT0, newT0);
   // a manual probe has no agent commits to attribute T1 changes to
   const changes = await diffT1(oldT1, newT1);
   const t2 = diffT2(oldT2, newT2);
+  const t3 = diffT3(oldT3, newT3, deep);
   const files = [
     await writeSnapshot(repo, target.host, "t0", newT0),
     await writeSnapshot(repo, target.host, "t1", newT1),
     await writeSnapshot(repo, target.host, "t2", newT2),
+    await writeSnapshot(repo, target.host, "t3", newT3),
   ];
 
   process.stdout.write(`old: ${against}\nnew: ${toplevel}\nsnapshots: ${files.join(", ")}\n\n`);
@@ -107,13 +115,15 @@ async function probe(repo: string, target: Target, against: string, build?: stri
   }
   process.stdout.write(`\nT2 validators: ${validators.map((v) => v.name).join(", ") || "none"}\n`);
   process.stdout.write(formatFindings("T2", t2));
+  process.stdout.write(`\nT3 probes: ${deep.map((p) => p.name).join(", ") || "none"}\n`);
+  process.stdout.write(formatFindings("T3", t3));
 
   try {
     process.stdout.write("\n" + (await run("nvd", ["diff", against, toplevel])));
   } catch {
     // nvd is wrapped into the package; missing only when run from source
   }
-  return [...findings, ...t2].some((f) => f.severity === "fail") ? 1 : 0;
+  return [...findings, ...t2, ...t3].some((f) => f.severity === "fail") ? 1 : 0;
 }
 
 function formatFindings(tier: string, findings: Finding[]): string {
