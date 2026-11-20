@@ -205,6 +205,8 @@ Probes are deterministic and capture behaviour as JSON or text snapshots. The ag
 | T2 | Every enabled program with a known validator | The program's own check, from the validator registry | Any error or new warning |
 | T3 | Deep behaviour, built in for nvim, zsh, tmux, Alacritty | See below | Any removed or changed keymap/alias/binding, startup error |
 
+Coverage follows the config: every enabled program gets the generic tiers plus its effective option values and a starts-cleanly check; deep probes are extras (ADR 0001). Every deciding comparison builds both sides now and differs in one thing only; committed snapshots are history (ADR 0002).
+
 Validator registry (T2), extendable per repo in `.flake-agent/probes/`:
 
 | Program | Validator |
@@ -251,7 +253,7 @@ Rules:
 - **Prepared alternative.** For every behaviour change the agent also writes, builds and probes the closest old-behaviour version and stores it as `.flake-agent/changes/<id>/keep-old.patch`. It is not applied.
 - **Fix loop limit.** At most 3 fix/rebuild/probe iterations per regression. Iterations 1–2 use `model`; iteration 3 uses `escalationModel`. Still red → blocked.
 - **Partial updates.** If one input is blocked, the agent may pin only that input to its previous revision and update the rest.
-- **Upstream-only changes.** A behaviour difference caused by the new lock alone (e.g. a changed default, or a T1 config file that differs without any agent edit) is not a failure. It gets a report entry as a behaviour change (`Change-Class: behaviour`, no fix commit). If I want the old behaviour back, `flake-agent revert <id>` has the agent prepare one.
+- **Upstream-only changes.** A behaviour difference caused by the new lock alone (e.g. a changed default, or a T1 config file that differs without any agent edit) is not a failure. It gets a report entry as a behaviour change (`Change-Class: behaviour`, no fix commit). If I want the old behaviour back, `flake-agent revert <id>`: a default change gets its old value written back, a package behaviour change gets an agent-prepared alternative, a removed feature can only be kept back by pinning its input (ADR 0001).
 - **Obsolete workarounds.** If an override or workaround (e.g. the pnpm hash overlay) is no longer needed, the agent proposes removing it as its own commit; this is guard-flagged like any overlay change.
 - **Sources.** Read-only `WebFetch` to: NixOS manual and release notes, home-manager manual and news, and the GitHub repos (releases, CHANGELOG, commits, issues) of the flake's own inputs, derived from `flake.lock`. No `WebSearch`. Enforced by a `PreToolUse` hook, not by the prompt.
 - **Preferences.** The agent always reads `.flake-agent/PREFERENCES.md` before deciding.
