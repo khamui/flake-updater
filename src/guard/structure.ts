@@ -6,7 +6,9 @@ export interface WriteScope {
   deny: string[];
 }
 
-export const DEFAULT_DENY = ["**/hardware-configuration.nix", ".flake-agent/PREFERENCES.md"];
+/** The user's standing rules: only `flake-agent revert`, run by the user, appends. */
+export const PREFERENCES = ".flake-agent/PREFERENCES.md";
+export const DEFAULT_DENY = ["**/hardware-configuration.nix", PREFERENCES];
 export const DEFAULT_DIFF_LIMIT = 60;
 export const DEFAULT_SELF_INPUT = "flake-updater";
 

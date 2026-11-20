@@ -8,11 +8,41 @@ export interface NeovimCapture {
   /** mode → lhs → rhs (or `<callback: desc>`). */
   keymaps: Record<string, Record<string, string>>;
   plugins: string[];
-  /** enabled LSP config → its command and whether that resolves to an executable. */
-  lsp: Record<string, { cmd: string; resolves: boolean }>;
+  /**
+   * enabled LSP config → its command, whether that resolves to an executable,
+   * and where it attaches (absent in snapshots from before these were captured).
+   */
+  lsp: Record<string, { cmd: string; resolves: boolean; filetypes?: string[]; workspaceRequired?: boolean }>;
   parsers: string[];
   /** WARNING/ERROR lines of `:checkhealth vim.lsp vim.treesitter`. */
   health: string[];
+}
+
+/**
+ * Where a server attaches: dropping filetypes, or requiring (or no longer
+ * requiring) a workspace root, changes which files get it. New filetypes are info.
+ */
+export function diffAttach(old: NeovimCapture["lsp"], next: NeovimCapture["lsp"]): Finding[] {
+  const findings: Finding[] = [];
+  for (const [name, was] of Object.entries(old)) {
+    const now = next[name];
+    if (!now) continue;
+    if (was.filetypes && now.filetypes) {
+      const removed = was.filetypes.filter((ft) => !now.filetypes!.includes(ft));
+      const added = now.filetypes.filter((ft) => !was.filetypes!.includes(ft));
+      if (removed.length) findings.push({ severity: "fail", kind: "nvim-lsp-filetypes-removed", subject: name, detail: removed.join(", ") });
+      if (added.length) findings.push({ severity: "info", kind: "nvim-lsp-filetypes-added", subject: name, detail: added.join(", ") });
+    }
+    if (was.workspaceRequired !== undefined && now.workspaceRequired !== undefined && was.workspaceRequired !== now.workspaceRequired) {
+      findings.push({
+        severity: "fail",
+        kind: "nvim-lsp-workspace",
+        subject: name,
+        detail: now.workspaceRequired ? "attaches only inside a workspace root now" : "attaches without a workspace root now",
+      });
+    }
+  }
+  return findings;
 }
 
 /** Runs after the user config is loaded; writes a NeovimCapture (minus startup) as JSON. */
@@ -53,12 +83,18 @@ out.plugins = sorted_keys(plugins)
 local configs = (vim.lsp.config and vim.lsp.config._configs) or {}
 for _, name in ipairs(sorted_keys(configs)) do
   if name ~= '*' and (vim.lsp.is_enabled == nil or vim.lsp.is_enabled(name)) then
-    local cmd = (vim.lsp.config[name] or {}).cmd
+    local config = vim.lsp.config[name] or {}
+    local cmd = config.cmd
     if type(cmd) == 'table' and cmd[1] then
       out.lsp[name] = { cmd = strip(cmd[1]), resolves = vim.fn.executable(cmd[1]) == 1 }
     else
       out.lsp[name] = { cmd = type(cmd), resolves = type(cmd) == 'function' }
     end
+    local filetypes = {}
+    for _, ft in ipairs(config.filetypes or {}) do table.insert(filetypes, ft) end
+    table.sort(filetypes)
+    out.lsp[name].filetypes = filetypes
+    out.lsp[name].workspaceRequired = config.workspace_required == true
   end
 end
 
@@ -125,7 +161,10 @@ export const neovimProbe: DeepProbe<NeovimCapture> = {
       ...rest,
       // vim.json encodes an empty table as []
       keymaps: Object.fromEntries(Object.entries(rest.keymaps).map(([m, maps]) => [m, Array.isArray(maps) ? {} : maps])),
-      lsp: Array.isArray(rest.lsp) ? {} : rest.lsp,
+      // vim.json encodes an empty filetypes list as {}
+      lsp: Array.isArray(rest.lsp)
+        ? {}
+        : Object.fromEntries(Object.entries(rest.lsp).map(([n, l]) => [n, Array.isArray(l.filetypes) || !l.filetypes ? l : { ...l, filetypes: [] }])),
       startup: { errors: startup.errors.map(clean), warnings: startup.warnings.map(clean) },
     };
   },
@@ -154,6 +193,7 @@ export const neovimProbe: DeepProbe<NeovimCapture> = {
     for (const name of Object.keys(next.lsp)) {
       if (!old.lsp[name]) findings.push({ severity: "info", kind: "nvim-lsp-added", subject: name, detail: next.lsp[name]!.cmd });
     }
+    findings.push(...diffAttach(old.lsp, next.lsp));
 
     findings.push(...diffSet(old.parsers, next.parsers, "nvim-parser", "fail"));
     findings.push(...diffSet(old.plugins, next.plugins, "nvim-plugin", "info"));

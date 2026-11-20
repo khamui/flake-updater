@@ -2,7 +2,7 @@ import { capture, run } from "../nix/exec.js";
 import { DEEP_PROBES } from "../probes/deep/index.js";
 import type { Finding } from "../probes/t0.js";
 import { diffT3, type T3Snapshot } from "../probes/t3.js";
-import { parseLog } from "../agent/trailers.js";
+import { parseLog, type ChangeCommit } from "../agent/trailers.js";
 
 /** Deep-probe findings a user notices at the keyboard: keymaps, aliases, bindings, language servers. */
 const INTERACTIVE = /keymap|alias|binding|prefix|lsp/;
@@ -25,7 +25,7 @@ export function withoutTrailers(body: string): string {
 
 const git = (repo: string, ...args: string[]) => run("git", ["-c", "safe.directory=*", "-C", repo, ...args]);
 
-async function fileAt(repo: string, rev: string, path: string): Promise<string | undefined> {
+export async function fileAt(repo: string, rev: string, path: string): Promise<string | undefined> {
   const r = await capture("git", ["-c", "safe.directory=*", "-C", repo, "show", `${rev}:${path}`]);
   return r.code === 0 ? r.stdout : undefined;
 }
@@ -34,16 +34,27 @@ async function fileAt(repo: string, rev: string, path: string): Promise<string |
  * The T3 snapshots around a change: the one in the tree just before its first
  * commit, and the first one committed after its last commit (snapshots are
  * committed after each build + probe pass, so that is the earliest capture that
- * includes the change).
+ * includes the change). `beforeAt`/`afterAt`: the commits that wrote them.
  */
-async function snapshotsAround(repo: string, first: string, last: string, tip: string, host: string) {
+export async function snapshotsAround(repo: string, first: string, last: string, tip: string, host: string) {
   const path = `.flake-agent/snapshots/${host}/t3.json`;
   const before = await fileAt(repo, `${first}^`, path);
+  const beforeAt = (await git(repo, "log", "-1", "--format=%H", `${first}^`, "--", path)).trim();
   const after = (await git(repo, "log", "--reverse", "--format=%H", `${last}..${tip}`, "--", path)).split("\n").filter(Boolean)[0];
   return {
     before: before ? (JSON.parse(before) as T3Snapshot) : undefined,
     after: after ? (JSON.parse((await fileAt(repo, after, path))!) as T3Snapshot) : undefined,
+    beforeAt,
+    afterAt: after,
   };
+}
+
+/** The commits carrying Change-Id `id` on `tip`, oldest first. */
+export async function changeCommits(repo: string, id: string, tip: string): Promise<ChangeCommit[]> {
+  const onTip = new Set((await git(repo, "rev-list", tip)).split("\n"));
+  return parseLog(await git(repo, "log", "--reverse", "--format=%H%x00%B%x01", "-F", `--grep=Change-Id: ${id}`, tip)).filter(
+    (c) => onTip.has(c.sha) && c.trailers["Change-Id"] === id,
+  );
 }
 
 /** `flake-agent show <id>`: upstream reason, diff, affected behaviour, available alternative. */
@@ -52,9 +63,7 @@ export async function showChange(repo: string, id: string, host: string): Promis
   const shas = (await git(repo, "log", "--all", "--format=%H", "-F", `--grep=Change-Id: ${id}`)).split("\n").filter(Boolean);
   if (shas.length === 0) return undefined;
   const tip = (await git(repo, "branch", "--all", "--format=%(refname)", "--sort=-committerdate", "--contains", shas[0]!)).split("\n")[0] || shas[0]!;
-  const onTip = new Set((await git(repo, "rev-list", tip)).split("\n"));
-  const commits = parseLog(await git(repo, "log", "--reverse", "--format=%H%x00%B%x01", "-F", `--grep=Change-Id: ${id}`, tip))
-    .filter((c) => onTip.has(c.sha) && c.trailers["Change-Id"] === id);
+  const commits = await changeCommits(repo, id, tip);
   if (commits.length === 0) return undefined;
   const first = commits[0]!;
   const last = commits.at(-1)!;

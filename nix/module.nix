@@ -154,6 +154,8 @@ in {
   config = mkIf cfg.enable {
     # the CLI: status, retry, skip, probe, …
     environment.systemPackages = [cfg.package];
+    # the user's own commands (revert) read the same config
+    environment.etc."flake-agent/config.json".source = agentConfig;
 
     users.users.flake-agent = {
       isSystemUser = true;
@@ -210,7 +212,7 @@ in {
       path = [config.nix.package];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${lib.getExe cfg.package} switch --config ${agentConfig} --state-dir ${stateDir} --switch-state-dir /var/lib/flake-agent-switch";
+        ExecStart = "${lib.getExe cfg.package} switch --config ${agentConfig} --state-dir ${stateDir} --switch-state-dir /var/lib/flake-agent-switch --user-request-dir /run/flake-agent";
         Group = "flake-agent";
         StateDirectory = "flake-agent-switch";
         StateDirectoryMode = "0750";
@@ -222,7 +224,8 @@ in {
     systemd.paths.flake-agent-switch = {
       description = "flake-agent switch request";
       wantedBy = ["paths.target"];
-      pathConfig.PathExists = "${stateDir}/switch-request.json";
+      # the agent's request, or the user's revert (`flake-agent revert`)
+      pathConfig.PathExists = ["${stateDir}/switch-request.json" "/run/flake-agent/switch-request.json"];
     };
 
     # The latest report, once, in the first interactive shell after it (no dotfile edits).
@@ -233,7 +236,7 @@ in {
     # The user reads agent and switch state (status, notifications, handoff).
     users.users.${cfg.user}.extraGroups = ["flake-agent"];
 
-    # The helper publishes idle time and rollback requests here.
+    # The helper publishes idle time and rollback requests here; revert its switch requests.
     systemd.tmpfiles.rules = ["d /run/flake-agent 0755 ${cfg.user} flake-agent -"];
 
     # Root: undoes the agent's last live switch when the helper's post-switch check fails.

@@ -100,6 +100,13 @@ pkgs.testers.runNixOSTest {
         # shown again on request
         assert "Update rolled back" in machine.succeed("su alice -c 'flake-agent report'")
 
+    with subtest("a user's switch request reaches the switch service, which takes only revert branches"):
+        req = shlex.quote(json.dumps({"commit": "e" * 40, "branch": "agent/update-x", "at": "t"}))
+        machine.succeed(f"su alice -c {shlex.quote(f'echo {req} > /run/flake-agent/switch-request.json')}")
+        machine.wait_until_fails("test -e /run/flake-agent/switch-request.json")
+        machine.succeed("journalctl -u flake-agent-switch | grep -F 'Invalid switch request: /run/flake-agent/switch-request.json'")
+        assert machine.succeed("cat /etc/flake-agent/config.json | ${pkgs.jq}/bin/jq -r .repo").strip() == "/home/alice/repo"
+
     with subtest("the user may start a run (Retry now), nothing else"):
         machine.succeed("su alice -c 'systemctl start --no-block flake-agent.service'")
         machine.fail("su alice -c 'systemctl start --no-block nix-gc.service'")

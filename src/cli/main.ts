@@ -4,25 +4,30 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { configAttr, discoverPackages, type Target } from "../discovery/discover.js";
-import { formatProbeRun, nvdDiff, probeAll, probeFailures } from "../probes/all.js";
+import { formatProbeRun, nvdDiff, probeAll, probeFailures, snapshotSystem } from "../probes/all.js";
 import { capture, run } from "../nix/exec.js";
 import { runGuard, type GuardOptions } from "../guard/guard.js";
 import { runCycle, skip, status } from "../preflight/cycle.js";
 import { preflight, readToken, realPreflight } from "../preflight/preflight.js";
 import { StateStore, defaultStateDir } from "../preflight/state.js";
 import { loadConfig } from "../run/config.js";
-import { superseded, updateRun, type UpdateDeps } from "../run/update.js";
+import { requestPath, superseded, updateRun, type SwitchRequest, type UpdateDeps } from "../run/update.js";
 import { DOC_HOSTS, githubRepos } from "../agent/hooks.js";
 import { fixLoop, runAgentSession } from "../agent/loop.js";
 import { captureKeepOld } from "../agent/keepold.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
-import { decideMode, realDeps, switchService } from "../switch/switch.js";
+import { USER_REQUEST_DIR, decideMode, realDeps, switchService } from "../switch/switch.js";
+import { prepareRevert } from "../revert/revert.js";
+import { PREFERENCES } from "../guard/structure.js";
+import type { T3Snapshot } from "../probes/t3.js";
 import { readLastSwitch, realRollbackDeps, rollbackService } from "../switch/rollback.js";
 import { latestEvent } from "../report/report.js";
 import { showChange } from "../report/show.js";
 import { realHelperDeps, tick, type HelperState } from "../helper/helper.js";
 
 const AGENT_STATE = "/var/lib/flake-agent";
+/** The module's agent config, for the user's own commands (revert). */
+const ETC_CONFIG = "/etc/flake-agent/config.json";
 const SWITCH_STATE = "/var/lib/flake-agent-switch";
 /** The user's own state: what the helper notified, dismissed and handed off. */
 const HELPER_STATE = () => join(defaultStateDir(), "helper.json");
@@ -47,6 +52,8 @@ Commands:
   status      Last run and its changes, generation, last switch, preflight, pending choice
   report      Show the latest report again (--once: only if not shown yet; the shell hook)
   show <id>   A change: upstream reason, affected keymaps/aliases, alternative, diff
+  revert <id> Apply the change's keep-old.patch (or git revert it), build, probe, commit
+              on agent/revert-<id> and hand it to the switch service
   switch      (root) Guard, build and switch/boot the commit the agent requested
   activate <toplevel>  (root) Set the system profile to <toplevel> and switch or boot
   gc          (root) nix-collect-garbage that keeps the newest --keep-system generations
@@ -73,6 +80,9 @@ Options:
   --no-agent        Build and probe only, no fix loop
   --use-login       Agent uses the Claude Code login in $HOME, not a token (development)
   --dry-run         switch: guard, build and decide, but don't apply
+  --note <text>     revert: append <text> to PREFERENCES.md (else asked; --no-note: don't)
+  --request-dir <d> revert: where the switch service looks (default: /run/flake-agent when installed)
+  --user-request-dir <d>  switch: also serve users' revert requests from <d>
   --delete-older-than <n>d  gc: like nix-collect-garbage
   --keep-system <n> gc: system generations always kept (default: 5)
   -h, --help        Show this help
@@ -109,6 +119,10 @@ async function main(argv: string[]): Promise<number> {
       "delete-older-than": { type: "string" },
       "keep-system": { type: "string" },
       once: { type: "boolean" },
+      note: { type: "string" },
+      "no-note": { type: "boolean" },
+      "request-dir": { type: "string" },
+      "user-request-dir": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -149,10 +163,13 @@ async function main(argv: string[]): Promise<number> {
       });
     case "switch": {
       const cfg = await loadConfig(values.config, { host: values.host, user: values.user });
-      const agentState = values["state-dir"] ?? "/var/lib/flake-agent";
-      const switchState = values["switch-state-dir"] ?? defaultStateDir().replace(/flake-agent$/, "flake-agent-switch");
+      const agentState = resolve(values["state-dir"] ?? "/var/lib/flake-agent");
+      const switchState = resolve(values["switch-state-dir"] ?? defaultStateDir().replace(/flake-agent$/, "flake-agent-switch"));
       const out = (text: string) => process.stdout.write(text);
-      const record = await switchService(cfg, agentState, switchState, realDeps(cfg, out), { dryRun: values["dry-run"] });
+      const record = await switchService(cfg, agentState, switchState, realDeps(cfg, out), {
+        dryRun: values["dry-run"],
+        userRequestDir: values["user-request-dir"] && resolve(values["user-request-dir"]),
+      });
       return !record || record.result === "switched" || record.result === "dry-run" ? 0 : 1;
     }
     case "activate": {
@@ -240,6 +257,80 @@ async function main(argv: string[]): Promise<number> {
         return 1;
       }
       process.stdout.write(text);
+      return 0;
+    }
+    case "revert": {
+      const id = positionals[1];
+      if (!id) {
+        process.stderr.write("revert: missing <change-id>\n");
+        return 2;
+      }
+      const installed = await isInstalled();
+      const file = values.config ?? (installed ? ETC_CONFIG : undefined);
+      // installed: the user's repo and host from the module; else this repo
+      const cfg = await loadConfig(file, file ? { repo: values.repo ? repo : undefined, host: values.host, user: values.user } : { repo, host: target.host, user: target.user });
+      const out = (text: string) => process.stdout.write(text);
+      const t = { flake: cfg.repo, host: cfg.host, user: cfg.user };
+      const result = await prepareRevert(
+        {
+          repo: cfg.repo,
+          mainBranch: cfg.mainBranch,
+          host: cfg.host,
+          id,
+          note: async (subject) => {
+            if (values["no-note"]) return undefined;
+            if (values.note) return `- ${values.note.trim()}`;
+            const text = `- ${id} (${subject}): keep the old behaviour; reverted ${new Date().toISOString().slice(0, 10)}.`;
+            if (!process.stdin.isTTY) return undefined;
+            const answer = await ask(`Add to ${PREFERENCES}, so future runs keep this?\n  ${text}\n[y/N] `);
+            return /^y(es)?$/i.test(answer.trim()) ? text : undefined;
+          },
+        },
+        {
+          out,
+          async build(dir) {
+            const r = await capture("nix", ["build", "--no-link", "--print-out-paths", configAttr({ ...t, flake: dir }, "config.system.build.toplevel")], {
+              env: process.env as Record<string, string>,
+              timeoutMs: 3 * 3600_000,
+            });
+            return r.code === 0
+              ? { ok: true, toplevel: r.stdout.trim().split("\n").at(-1) }
+              : { ok: false, error: r.stderr.trim().split("\n").slice(-10).join("\n") };
+          },
+          async snapshot(dir, toplevel) {
+            const files = await snapshotSystem(dir, { ...t, flake: dir }, toplevel);
+            return JSON.parse(await readFile(files.find((f) => f.endsWith("t3.json"))!, "utf8")) as T3Snapshot;
+          },
+        },
+      );
+      out(`${result.method === "keep-old" ? "Applied keep-old.patch" : "Reverted the change's commits"} on ${result.branch} (${result.commit.slice(0, 12)})\n`);
+      const finding = (f: { kind: string; subject: string; detail?: string }) => `${f.kind} ${f.subject}${f.detail ? `: ${f.detail}` : ""}`;
+      if (result.restored.length) out(`Probes: restored\n${result.restored.map((f) => `  ✓ ${finding(f)}\n`).join("")}`);
+      if (result.effect.length) out(`Probes: changed by the revert\n${result.effect.map((f) => `  ↩ ${finding(f)}\n`).join("")}`);
+      if (result.caveat) out(`${result.caveat}\n`);
+      if (result.noted) out(`Noted in ${PREFERENCES}\n`);
+
+      // a dry run of the switch service's guard: say now if it will hold the revert for review
+      const verdict = await runGuard({
+        repo: cfg.repo,
+        host: cfg.host,
+        user: cfg.user,
+        rev: result.commit,
+        mainRef: cfg.mainBranch,
+        writeScope: { ...cfg.writeScope, allow: [...(cfg.writeScope.allow ?? []), PREFERENCES] },
+        diffLimit: cfg.diffLimit,
+        selfInput: cfg.selfInput,
+      }).catch((err: Error) => ({ verdict: "block" as const, reasons: [`guard failed: ${err.message}`] }));
+      if (verdict.verdict !== "pass") out(`The guard will hold it for review:\n${verdict.reasons.map((r) => `  ⛔ ${r}\n`).join("")}`);
+
+      const dir = values["request-dir"] ?? (installed ? USER_REQUEST_DIR : undefined);
+      if (!dir) {
+        out("No switch service here (--request-dir): merge the branch and switch by hand.\n");
+        return 0;
+      }
+      const req: SwitchRequest = { commit: result.commit, branch: result.branch, at: new Date().toISOString(), base: result.base };
+      await writeFile(requestPath(dir), JSON.stringify(req) + "\n");
+      out("Handed to the switch service: it switches now (or sets the boot entry); flake-agent report shows the outcome.\n");
       return 0;
     }
     case "rollback":
@@ -356,6 +447,16 @@ async function main(argv: string[]): Promise<number> {
     default:
       process.stderr.write(`unknown command: ${command}\n\n${HELP}`);
       return 2;
+  }
+}
+
+async function ask(question: string): Promise<string> {
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(question);
+  } finally {
+    rl.close();
   }
 }
 

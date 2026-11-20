@@ -1,10 +1,12 @@
-import { lutimes, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { access, lutimes, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { findProfiles, listGenerations, parseAge, selectForDeletion } from "../../src/switch/generations.js";
-import { decideMode, readRequest, switchCommit, type SwitchDeps } from "../../src/switch/switch.js";
+import { decideMode, readRequest, switchCommit, switchService, type SwitchDeps } from "../../src/switch/switch.js";
 import { requestPath } from "../../src/run/update.js";
+import { DEFAULTS, type AgentConfig } from "../../src/run/config.js";
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 10, 25);
@@ -116,5 +118,50 @@ describe("switch service", () => {
     await write({ ...req, branch: "agent/x; rm -rf /" });
     expect(await readRequest(state)).toBeUndefined();
   });
-});
 
+  describe("a user's revert", () => {
+    /** The user's repo with a revert branch, and the service's dirs. */
+    async function setup(branch = "agent/revert-x-2026-11") {
+      const repo = await mkdtemp(join(tmpdir(), "user-repo-"));
+      const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=k", "-c", "user.email=k@x", "-C", repo, ...args], { encoding: "utf8" }).trim();
+      execFileSync("git", ["init", "-q", "-b", "main", repo]);
+      git("commit", "-q", "--allow-empty", "-m", "init");
+      const base = git("rev-parse", "HEAD");
+      git("checkout", "-qb", branch);
+      git("commit", "-q", "--allow-empty", "-m", "Revert x");
+      const commit = git("rev-parse", "HEAD");
+      const dirs = { agent: await mkdtemp(join(tmpdir(), "agent-")), sw: await mkdtemp(join(tmpdir(), "switch-")), user: await mkdtemp(join(tmpdir(), "run-")) };
+      await writeFile(requestPath(dirs.user), JSON.stringify({ commit, branch, at: "t", base }));
+      const cfg: AgentConfig = { ...DEFAULTS, repo, host: "laptop", user: "kha" };
+      const d = { ...deps("pass"), guard: vi.fn(deps("pass").guard), waitForIdle: vi.fn(async () => "idle" as const) };
+      return { cfg, dirs, d, commit, base };
+    }
+    const gone = (file: string) => access(file).then(() => false, () => true);
+
+    it("goes through the guard and switches from the user's repo, without waiting for idle", async () => {
+      const { cfg, dirs, d, commit, base } = await setup();
+      const rec = await switchService(cfg, dirs.agent, dirs.sw, d, { userRequestDir: dirs.user });
+      expect(rec).toMatchObject({ result: "switched", commit, runBase: base, source: "user", branch: "agent/revert-x-2026-11" });
+      // PREFERENCES.md: the user's note, which the agent may never write
+      expect(d.guard).toHaveBeenCalledWith(join(dirs.sw, "repo.git"), commit, [".flake-agent/PREFERENCES.md"]);
+      expect(d.waitForIdle).not.toHaveBeenCalled();
+      expect(await gone(requestPath(dirs.user))).toBe(true);
+      expect(JSON.parse(await readFile(join(dirs.sw, "last-switch.json"), "utf8"))).toMatchObject({ source: "user", commit });
+    });
+
+    it("takes the agent's request first; the user's waits for the next start", async () => {
+      const { cfg, dirs, d } = await setup();
+      await writeFile(requestPath(dirs.agent), "{}");
+      expect(await switchService(cfg, dirs.agent, dirs.sw, d, { userRequestDir: dirs.user })).toBeUndefined();
+      expect(await gone(requestPath(dirs.agent))).toBe(true);
+      expect(await gone(requestPath(dirs.user))).toBe(false);
+    });
+
+    it("accepts only a revert branch from the user, and consumes an invalid request", async () => {
+      const { cfg, dirs, d } = await setup("agent/update-2026-11-25");
+      expect(await switchService(cfg, dirs.agent, dirs.sw, d, { userRequestDir: dirs.user })).toBeUndefined();
+      expect(d.guard).not.toHaveBeenCalled();
+      expect(await gone(requestPath(dirs.user))).toBe(true);
+    });
+  });
+});

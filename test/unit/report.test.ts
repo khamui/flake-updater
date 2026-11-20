@@ -65,6 +65,14 @@ describe("report", () => {
     expect(e.text).toContain("Update rolled back (2026-11-25): nvim-startup-error neovim");
   });
 
+  it("says which change a user's revert undid", () => {
+    const rec: SwitchRecord = { ...switched, commit: "b".repeat(40), branch: "agent/revert-nvf-tailwind-2026-11", source: "user" };
+    const e = latestEvent({ lastRun: run }, rec)!;
+    expect(e.text).toMatch(/^System updated \(2026-11-25\), generation 412 → 413\n {2}↩ reverted nvf-tailwind-2026-11/);
+    // not the run's report: the switched commit is the revert, not the run's
+    expect(e.text).not.toContain("nvf-ts-rename");
+  });
+
   it("reports guard blocks, blocked runs and pending choices, newest first", () => {
     const review: SwitchRecord = { ...switched, result: "needs-review", reasons: ["hash: outputHash changed"] };
     expect(latestEvent({ lastRun: run }, review)!.text).toContain("guard: hash: outputHash changed");
