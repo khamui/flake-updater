@@ -87,3 +87,10 @@ describe("T3", () => {
     expect(diffT3(old, next, DEEP_PROBES)).toEqual([]);
   });
 });
+
+describe("snapshot files", () => {
+  it("serialise the same capture identically whatever the key order", async () => {
+    const { canonical } = await import("../../src/probes/snapshots.js");
+    expect(JSON.stringify(canonical({ b: { y: 1, x: [{ d: 1, c: 2 }] }, a: 1 }))).toBe('{"a":1,"b":{"x":[{"c":2,"d":1}],"y":1}}');
+  });
+});

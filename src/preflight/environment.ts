@@ -1,4 +1,4 @@
-import { open, readdir, readFile, rm, statfs } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rm, statfs } from "node:fs/promises";
 import { join } from "node:path";
 import type { PreflightFailure } from "./subscription.js";
 
@@ -60,6 +60,7 @@ export async function lockHolder(stateDir: string): Promise<number | undefined> 
 /** Take the run lock; returns a release function, or undefined if another run holds it. */
 export async function acquireLock(stateDir: string): Promise<(() => Promise<void>) | undefined> {
   if (await lockHolder(stateDir)) return undefined;
+  await mkdir(stateDir, { recursive: true });
   await rm(lockPath(stateDir), { force: true });
   try {
     const file = await open(lockPath(stateDir), "wx");

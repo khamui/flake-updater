@@ -3,7 +3,12 @@
  * parts of the evaluated config as JSON-able data. A TS string so it ships
  * with the build (pure eval can't import a file from outside the flake).
  */
-export const GUARD_NIX = `user: sys: let
+export const GUARD_NIX = `user: sys0: let
+  # The baseline is main + the new lock, which is broken exactly when the agent
+  # had something to fix (e.g. an option upstream removed). Without the check,
+  # definitions of options that no longer exist are ignored instead of making
+  # every value fail; everything else still evaluates and is compared.
+  sys = sys0.extendModules {modules = [{_module.check = false;}];};
   inherit (sys) config options;
 
   # Option trees can hold functions, derivations and throwing defaults.
@@ -74,7 +79,11 @@ in {
   };
   "boot.kernel" = safe 0 config.boot.kernelPackages.kernel;
   "environment.etc" = safe 1 (builtins.filter (n: etc.\${n}.enable or true) (builtins.attrNames etc));
-  "system.activationScripts" = safe 3 (builtins.mapAttrs (_: s: if builtins.isString s then s else safe 2 (s.text or s)) config.system.activationScripts);
+  # Each snippet on its own. Not the aggregates: \`script\` concatenates all snippets
+  # and \`etc\` installs the /etc tree (guarded by its keys and rendered files) —
+  # both fail to evaluate on a broken baseline even when no snippet changed.
+  "system.activationScripts" = safe 3 (builtins.mapAttrs (_: s: if builtins.isString s then s else safe 2 (s.text or s))
+    (removeAttrs config.system.activationScripts ["script" "etc"]));
   "nixpkgs.overlays" = {
     count = safe 0 (builtins.length config.nixpkgs.overlays);
     files = safe 1 (map (d: d.file) options.nixpkgs.overlays.definitionsWithLocations);

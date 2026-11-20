@@ -6,10 +6,23 @@ export function snapshotDir(repo: string, host: string): string {
   return join(repo, ".flake-agent", "snapshots", host);
 }
 
+/** Object keys sorted at every level: the same capture always serialises the same way. */
+export function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((k) => [k, canonical((value as Record<string, unknown>)[k])]),
+    );
+  }
+  return value;
+}
+
 export async function writeSnapshot(repo: string, host: string, name: string, data: unknown): Promise<string> {
   const dir = snapshotDir(repo, host);
   await mkdir(dir, { recursive: true });
   const file = join(dir, `${name}.json`);
-  await writeFile(file, JSON.stringify(data, null, 2) + "\n");
+  await writeFile(file, JSON.stringify(canonical(data), null, 2) + "\n");
   return file;
 }

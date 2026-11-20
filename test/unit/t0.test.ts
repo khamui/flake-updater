@@ -85,3 +85,20 @@ describe("diffT0", () => {
     expect(findings.map((f) => f.kind)).toEqual(["package-version", "package-added", "binary-added"]);
   });
 });
+
+describe("versioned binary names", () => {
+  it("treats perl5.42.0 → perl5.42.1 from the same package as a rename", () => {
+    const old: T0Snapshot = { tier: "T0", packages: { perl: ["5.42.0"] }, binaries: { system: { "perl5.42.0": "perl-5.42.0", perl: "perl-5.42.0" } } };
+    const next: T0Snapshot = { tier: "T0", packages: { perl: ["5.42.1"] }, binaries: { system: { "perl5.42.1": "perl-5.42.1", perl: "perl-5.42.1" } } };
+    expect(diffT0(old, next).map((f) => [f.severity, f.kind, f.subject])).toEqual([
+      ["info", "package-version", "perl"],
+      ["info", "binary-renamed", "system/perl5.42.0"],
+    ]);
+  });
+
+  it("still fails when a binary is really gone", () => {
+    const old: T0Snapshot = { tier: "T0", packages: {}, binaries: { system: { logoutd: "shadow-4.19.4" } } };
+    const next: T0Snapshot = { tier: "T0", packages: {}, binaries: { system: {} } };
+    expect(diffT0(old, next).map((f) => f.kind)).toEqual(["binary-removed"]);
+  });
+});

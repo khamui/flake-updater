@@ -16,8 +16,14 @@ export interface AgentConfig {
   minFreeGB: number;
   selfInput: string;
   writeScope: WriteScope;
-  /** Live system the probes compare against. */
+  /**
+   * What the probes compare the update against: "base" (main built before the
+   * update, so only the update's effect shows) or a system path such as
+   * /run/current-system.
+   */
   against: string;
+  /** Extra domains WebFetch may reach. */
+  extraSources: string[];
   /** A live switch waits for this much user idle time... */
   idleMinutes: number;
   /** ...for at most this long, then only the boot entry is set. */
@@ -33,7 +39,8 @@ export const DEFAULTS: Omit<AgentConfig, "repo" | "host" | "user"> = {
   minFreeGB: 10,
   selfInput: DEFAULT_SELF_INPUT,
   writeScope: { allow: [], deny: [] },
-  against: "/run/current-system",
+  against: "base",
+  extraSources: [],
   idleMinutes: 15,
   idleFallbackHours: 24,
 };

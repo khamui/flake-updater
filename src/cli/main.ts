@@ -8,10 +8,12 @@ import { formatProbeRun, nvdDiff, probeAll, probeFailures } from "../probes/all.
 import { capture, run } from "../nix/exec.js";
 import { runGuard, type GuardOptions } from "../guard/guard.js";
 import { runCycle, skip, status } from "../preflight/cycle.js";
-import { preflight, realPreflight } from "../preflight/preflight.js";
+import { preflight, readToken, realPreflight } from "../preflight/preflight.js";
 import { StateStore, defaultStateDir } from "../preflight/state.js";
 import { loadConfig } from "../run/config.js";
-import { superseded, updateRun } from "../run/update.js";
+import { superseded, updateRun, type UpdateDeps } from "../run/update.js";
+import { DOC_HOSTS, githubRepos } from "../agent/hooks.js";
+import { fixLoop, runAgentSession } from "../agent/loop.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
 import { decideMode, realDeps, switchService } from "../switch/switch.js";
 import { realRollbackDeps, rollbackService } from "../switch/rollback.js";
@@ -59,6 +61,8 @@ Options:
   --min-free-gb <n> Free space needed on /nix (default: 10)
   --config <file>   Agent config (JSON, written by the NixOS module)
   --no-preflight    Skip preflight (testing the AI-free run only)
+  --no-agent        Build and probe only, no fix loop
+  --use-login       Agent uses the Claude Code login in $HOME, not a token (development)
   --dry-run         switch: guard, build and decide, but don't apply
   --delete-older-than <n>d  gc: like nix-collect-garbage
   --keep-system <n> gc: system generations always kept (default: 5)
@@ -89,6 +93,8 @@ async function main(argv: string[]): Promise<number> {
       "min-free-gb": { type: "string" },
       config: { type: "string" },
       "no-preflight": { type: "boolean" },
+      "no-agent": { type: "boolean" },
+      "use-login": { type: "boolean" },
       "dry-run": { type: "boolean" },
       "switch-state-dir": { type: "string" },
       "delete-older-than": { type: "string" },
@@ -185,7 +191,7 @@ async function main(argv: string[]): Promise<number> {
     case "retry":
     case "skip":
     case "status": {
-      const state = new StateStore(values["state-dir"] ?? defaultStateDir());
+      const state = new StateStore(resolve(values["state-dir"] ?? defaultStateDir()));
       const out = (text: string) => process.stdout.write(text);
       // with the module installed, a user's retry/skip act on the system service
       if (!values["state-dir"] && process.getuid?.() !== 0 && (await isInstalled())) {
@@ -228,7 +234,44 @@ async function main(argv: string[]): Promise<number> {
         minFreeGB: cfg.minFreeGB,
       });
       const update = async () => {
-        const record = await updateRun(cfg, state.dir, { out });
+        const credentials = {
+          credentialsDir: process.env.CREDENTIALS_DIRECTORY,
+          tokenFile: values["token-file"],
+          envToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+        };
+        const fix: UpdateDeps["fix"] = values["no-agent"]
+          ? undefined
+          : async (v, { repo, verify, head }) => {
+              const token = values["use-login"] ? undefined : await readToken(credentials);
+              if (!token && !values["use-login"]) return { status: "interrupted", iterations: 0, failure: { reason: "no-credential", message: "No subscription token" } };
+              const hooks = {
+                repo,
+                writeScope: cfg.writeScope,
+                selfInput: cfg.selfInput,
+                allowedHosts: [...DOC_HOSTS, ...cfg.extraSources],
+                allowedGithubRepos: githubRepos(await readFile(join(repo, "flake.lock"), "utf8")),
+              };
+              const prefs = await readFile(join(repo, ".flake-agent", "PREFERENCES.md"), "utf8").catch(() => undefined);
+              return fixLoop(cfg, v, {
+                runAgent: (prompt, model) =>
+                  runAgentSession({
+                    cfg,
+                    repo,
+                    prompt,
+                    model,
+                    token,
+                    executable: process.env.FLAKE_AGENT_CLAUDE,
+                    home: process.env.HOME ?? state.dir,
+                    hooks,
+                    onDeny: (tool, reason) => out(`  refused ${tool}: ${reason}\n`),
+                    out,
+                  }),
+                verify,
+                head,
+                out,
+              }, prefs);
+            };
+        const record = await updateRun(cfg, state.dir, { out, fix });
         await state.update((s) => {
           const old = superseded(s.lastRun, record);
           if (old) out(`main moved: ${old} superseded\n`);
