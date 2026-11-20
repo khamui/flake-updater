@@ -14,6 +14,17 @@ self: {
   agentConfig = pkgs.writeText "flake-agent.json" (builtins.toJSON {
     inherit (cfg) repo host user mainBranch model escalationModel maxFixIterations diffLimit minFreeGB selfInput writeScope idleMinutes idleFallbackHours extraSources;
   });
+
+  reportHook = ''
+    if [ "$USER" = ${lib.escapeShellArg cfg.user} ]; then
+      __flake_agent_seen="''${XDG_STATE_HOME:-$HOME/.local/state}/flake-agent/report-seen"
+      if [ ! -e "$__flake_agent_seen" ] || [ ${stateDir}/state.json -nt "$__flake_agent_seen" ] \
+        || [ /var/lib/flake-agent-switch/last-switch.json -nt "$__flake_agent_seen" ]; then
+        ${lib.getExe cfg.package} report --once 2>/dev/null
+      fi
+      unset __flake_agent_seen
+    fi
+  '';
 in {
   options.services.flake-agent = {
     enable = mkEnableOption "the unattended flake update agent";
@@ -213,6 +224,11 @@ in {
       wantedBy = ["paths.target"];
       pathConfig.PathExists = "${stateDir}/switch-request.json";
     };
+
+    # The latest report, once, in the first interactive shell after it (no dotfile edits).
+    # Plain `test -nt` first: node only starts when a state file changed since the last look.
+    programs.zsh.interactiveShellInit = reportHook;
+    programs.bash.interactiveShellInit = reportHook;
 
     # The user reads agent and switch state (status, notifications, handoff).
     users.users.${cfg.user}.extraGroups = ["flake-agent"];

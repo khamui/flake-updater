@@ -5,6 +5,8 @@ export const CHANGE_CLASSES = ["mechanical", "behaviour", "review", "blocked"];
 export interface ChangeCommit {
   sha: string;
   subject: string;
+  /** The message after the subject line, trailers included. */
+  body: string;
   trailers: Record<string, string>;
 }
 
@@ -24,7 +26,8 @@ export function parseLog(log: string): ChangeCommit[] {
         if (!m) break;
         trailers[m[1]!] ??= m[2]!.trim();
       }
-      return { sha: sha!.trim(), subject: body.split("\n")[0]!.trim(), trailers };
+      const [subject = "", ...rest] = body.trim().split("\n");
+      return { sha: sha!.trim(), subject: subject.trim(), body: rest.join("\n").trim(), trailers };
     });
 }
 

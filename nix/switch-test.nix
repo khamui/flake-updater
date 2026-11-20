@@ -22,6 +22,7 @@ pkgs.testers.runNixOSTest {
       tokenFile = "/etc/flake-agent-token";
     };
     users.users.alice.isNormalUser = true;
+    programs.zsh.enable = true;
 
     nix.gc = {
       automatic = true;
@@ -82,6 +83,22 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("readlink /nix/var/nix/profiles/system").strip() == "system-1-link"
         machine.succeed("grep -x new /etc/flake-agent-test")
         machine.succeed("grep -F rolledBack /var/lib/flake-agent-switch/last-switch.json")
+
+    with subtest("the next interactive shell prints the report once"):
+        run = {"lastRun": {"at": "s", "status": "green", "branch": "agent/x", "commit": sha, "updatedInputs": ["nvf"],
+                           "changes": [{"sha": "1", "subject": "languages.ts → languages.typescript", "id": "nvf-ts-2026-11", "class": "mechanical"}]}}
+        machine.succeed("mkdir -p /var/lib/flake-agent")
+        machine.succeed(f"echo {shlex.quote(json.dumps(run))} > /var/lib/flake-agent/state.json")
+        first = machine.succeed("su alice -c 'zsh -i -c true' 2>&1")
+        print(first)
+        assert "Update rolled back" in first and "nvf-ts-2026-11" in first, first
+        again = machine.succeed("su alice -c 'zsh -i -c true; bash -i -c true' 2>&1")
+        assert "Update" not in again, again
+        # another user's shell stays quiet
+        machine.succeed("useradd -m bob")
+        assert "Update" not in machine.succeed("su bob -c 'zsh -i -c true' 2>&1")
+        # shown again on request
+        assert "Update rolled back" in machine.succeed("su alice -c 'flake-agent report'")
 
     with subtest("the user may start a run (Retry now), nothing else"):
         machine.succeed("su alice -c 'systemctl start --no-block flake-agent.service'")

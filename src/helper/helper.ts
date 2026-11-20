@@ -22,6 +22,8 @@ export interface HelperState {
   dismissedPending?: string;
   /** `at` of the last switch record handled. */
   handledSwitch?: string;
+  /** Where the last switched commit went in the user's repo, for the report. */
+  handoff?: { commit: string; note: string };
 }
 
 export interface HelperDeps {
@@ -108,6 +110,7 @@ async function handleSwitch(rec: SwitchRecord, deps: HelperDeps): Promise<void> 
     }
   }
   const h = await deps.handoff(rec).catch((err: Error): HandoffResult => ({ applied: false, fastForwarded: false, note: `handoff failed: ${err.message}` }));
+  await deps.save({ ...(await deps.load()), handoff: { commit: rec.commit, note: h.note } });
   const what =
     rec.mode === "boot"
       ? `Applies on next reboot (generation ${rec.from} → ${rec.to})${rec.idleFallback ? ": not idle within 24 h" : ""}`

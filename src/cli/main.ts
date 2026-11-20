@@ -17,11 +17,16 @@ import { fixLoop, runAgentSession } from "../agent/loop.js";
 import { captureKeepOld } from "../agent/keepold.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
 import { decideMode, realDeps, switchService } from "../switch/switch.js";
-import { realRollbackDeps, rollbackService } from "../switch/rollback.js";
+import { readLastSwitch, realRollbackDeps, rollbackService } from "../switch/rollback.js";
+import { latestEvent } from "../report/report.js";
+import { showChange } from "../report/show.js";
 import { realHelperDeps, tick, type HelperState } from "../helper/helper.js";
 
 const AGENT_STATE = "/var/lib/flake-agent";
 const SWITCH_STATE = "/var/lib/flake-agent-switch";
+/** The user's own state: what the helper notified, dismissed and handed off. */
+const HELPER_STATE = () => join(defaultStateDir(), "helper.json");
+const readHelperState = async () => JSON.parse(await readFile(HELPER_STATE(), "utf8").catch(() => "{}")) as HelperState;
 
 /** Is the NixOS module enabled on this system? */
 const isInstalled = () =>
@@ -39,7 +44,9 @@ Commands:
   run         Preflight (credential, subscription, AC, disk, lock), then one update cycle
   retry       After a failed preflight: preflight again, then run
   skip        Dismiss a failed run; wait for the next cycle
-  status      Preflight state and pending choice
+  status      Last run and its changes, generation, last switch, preflight, pending choice
+  report      Show the latest report again (--once: only if not shown yet; the shell hook)
+  show <id>   A change: upstream reason, affected keymaps/aliases, alternative, diff
   switch      (root) Guard, build and switch/boot the commit the agent requested
   activate <toplevel>  (root) Set the system profile to <toplevel> and switch or boot
   gc          (root) nix-collect-garbage that keeps the newest --keep-system generations
@@ -176,7 +183,7 @@ async function main(argv: string[]): Promise<number> {
       const deps = realHelperDeps(cfg, {
         agentState: AGENT_STATE,
         switchState: SWITCH_STATE,
-        helperState: join(defaultStateDir(), "helper.json"),
+        helperState: HELPER_STATE(),
       });
       for (;;) {
         const background = await tick(deps);
@@ -196,6 +203,45 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(`Saved ${await captureKeepOld(process.cwd(), positionals[1])}; working tree restored\n`);
       return 0;
     }
+    case "report": {
+      // installed: the services' state; else (development) --state-dir/--switch-state-dir
+      const agentState = values["state-dir"] ?? AGENT_STATE;
+      const switchState = values["switch-state-dir"] ?? SWITCH_STATE;
+      const helper = await readHelperState();
+      const state = await new StateStore(agentState).load();
+      if (state.pending?.since === helper.dismissedPending) delete state.pending;
+      const rec = await readLastSwitch(switchState);
+      const event = latestEvent(state, rec, rec && helper.handoff?.commit === rec.commit ? helper.handoff.note : undefined);
+      const seenFile = join(defaultStateDir(), "report-seen");
+      // every key shown, newest last: dismissing a newer event must not bring an older report back
+      const seen = (await readFile(seenFile, "utf8").catch(() => "")).split("\n").filter(Boolean);
+      if (!event) {
+        if (!values.once) process.stdout.write("Nothing to report yet.\n");
+      } else if (!values.once || !seen.includes(event.key)) {
+        process.stdout.write(event.text);
+      }
+      // the shell hook compares the marker's mtime with the state files: touch it either way
+      const keys = event && !seen.includes(event.key) ? [...seen, event.key] : seen;
+      await mkdir(dirname(seenFile), { recursive: true }).catch(() => undefined);
+      await writeFile(seenFile, keys.slice(-50).map((k) => `${k}\n`).join("")).catch(() => undefined);
+      return 0;
+    }
+    case "show": {
+      const id = positionals[1];
+      if (!id) {
+        process.stderr.write("show: missing <change-id>\n");
+        return 2;
+      }
+      // installed: the agent's clone holds every run's branch
+      const from = values.repo ? repo : (await isInstalled()) ? join(AGENT_STATE, "repo") : repo;
+      const text = await showChange(from, id, target.host);
+      if (!text) {
+        process.stderr.write(`show: no change ${id} in ${from}\n`);
+        return 1;
+      }
+      process.stdout.write(text);
+      return 0;
+    }
     case "rollback":
       return (await rollbackService(SWITCH_STATE, realRollbackDeps((t) => process.stdout.write(t)))) ? 0 : 1;
     case "run":
@@ -213,17 +259,25 @@ async function main(argv: string[]): Promise<number> {
         }
         if (command === "skip") {
           const pending = (await new StateStore(AGENT_STATE).load()).pending;
-          const file = join(defaultStateDir(), "helper.json");
-          const s = JSON.parse(await readFile(file, "utf8").catch(() => "{}")) as HelperState;
+          const file = HELPER_STATE();
+          const s = await readHelperState();
           await mkdir(dirname(file), { recursive: true });
           await writeFile(file, JSON.stringify({ ...s, dismissedPending: pending?.since }, null, 2) + "\n");
           out(pending ? "Skipped: the next scheduled cycle runs as usual.\n" : "Nothing pending.\n");
           return 0;
         }
-        if (command === "status") return status(new StateStore(AGENT_STATE), out);
+        if (command === "status") {
+          return status(new StateStore(AGENT_STATE), out, {
+            generation: (await listGenerations(SYSTEM_PROFILE)).current,
+            lastSwitch: await readLastSwitch(SWITCH_STATE),
+            dismissedPending: (await readHelperState()).dismissedPending,
+          });
+        }
       }
       if (command === "skip") return skip(state, out);
-      if (command === "status") return status(state, out);
+      if (command === "status") {
+        return status(state, out, values["switch-state-dir"] ? { lastSwitch: await readLastSwitch(values["switch-state-dir"]) } : {});
+      }
       const cfg = await loadConfig(values.config, {
         repo: values.repo ? repo : undefined,
         host: values.host,

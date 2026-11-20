@@ -1,9 +1,10 @@
-import { access, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { configAttr } from "../discovery/discover.js";
 import { capture, run } from "../nix/exec.js";
 import { acquireLock } from "../preflight/environment.js";
-import { probeAll, probeFailures, type ProbeRun } from "../probes/all.js";
+import { probeAll, probeFailures, snapshotSystem, type ProbeRun } from "../probes/all.js";
+import { changesEntry, prependEntry } from "../report/report.js";
 import type { AgentConfig } from "./config.js";
 import type { FixOutcome, Verification } from "../agent/loop.js";
 import { parseLog, trailerProblems, type ChangeCommit } from "../agent/trailers.js";
@@ -185,6 +186,12 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
     const lockCommit = await git.run("rev-parse", "HEAD");
 
     const target = { flake: dir, host: cfg.host, user: cfg.user };
+    if (!(await git.run("ls-tree", "--name-only", base, `.flake-agent/snapshots/${cfg.host}/t3.json`))) {
+      // first run: `show <id>` diffs each change against the snapshots before it
+      await snapshotSystem(dir, target, against);
+      await git.run("add", ".flake-agent/snapshots");
+      await git.run("commit", "-q", "-m", `snapshots: baseline from ${base.slice(0, 12)}`);
+    }
     let toplevel: string | undefined;
     let failing = 0;
     /** Build HEAD (uncommitted edits discarded), probe, commit the snapshots. */
@@ -288,18 +295,11 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
       }
     }
 
-    const commit = await git.run("rev-parse", "HEAD");
-    if (status === "green") {
-      const req: SwitchRequest = { commit, branch, at, base };
-      await writeFile(requestPath(stateDir), JSON.stringify(req) + "\n");
-    }
-    deps.out(`${branch} ${commit.slice(0, 12)}: ${status}\n`);
-    return {
+    const record: RunRecord = {
       at,
       status,
       base,
       branch,
-      commit,
       lockCommit,
       ...(toplevel ? { toplevel } : {}),
       updatedInputs: inputs,
@@ -310,6 +310,21 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
       ...(pinned ? { pinned } : {}),
       ...(keepOld.length ? { keepOld } : {}),
     };
+
+    // the run's entry on top of CHANGES.md: it reaches main with the handoff
+    const changesFile = join(dir, ".flake-agent", "CHANGES.md");
+    await mkdir(dirname(changesFile), { recursive: true });
+    await writeFile(changesFile, prependEntry(await readFile(changesFile, "utf8").catch(() => undefined), changesEntry(record)));
+    await git.run("add", ".flake-agent/CHANGES.md");
+    await git.run("commit", "-q", "-m", `CHANGES.md: ${branch} (${status})`);
+
+    const commit = await git.run("rev-parse", "HEAD");
+    if (status === "green") {
+      const req: SwitchRequest = { commit, branch, at, base };
+      await writeFile(requestPath(stateDir), JSON.stringify(req) + "\n");
+    }
+    deps.out(`${branch} ${commit.slice(0, 12)}: ${status}\n`);
+    return { ...record, commit };
   } finally {
     await release();
   }
