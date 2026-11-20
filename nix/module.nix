@@ -12,7 +12,7 @@ self: {
   stateDir = "/var/lib/flake-agent";
 
   agentConfig = pkgs.writeText "flake-agent.json" (builtins.toJSON {
-    inherit (cfg) repo host user mainBranch model escalationModel maxFixIterations diffLimit minFreeGB selfInput writeScope idleMinutes idleFallbackHours;
+    inherit (cfg) repo host user mainBranch model escalationModel maxFixIterations diffLimit minFreeGB selfInput writeScope idleMinutes idleFallbackHours extraSources;
   });
 in {
   options.services.flake-agent = {

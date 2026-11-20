@@ -43,7 +43,8 @@ export async function snapshotT0(store: Store, toplevel: string, user: string): 
   const binaries: T0Snapshot["binaries"] = {};
 
   for (const [profile, link] of Object.entries(profiles(toplevel, user))) {
-    const env = storeRoot(await store.resolve(link));
+    // a user without packages of their own has no per-user profile
+    const env = await store.resolve(link).then(storeRoot, () => undefined);
     if (!env) continue;
     await collectPackages(store, env, names);
 
@@ -85,21 +86,42 @@ export function diffT0(old: T0Snapshot, next: T0Snapshot): Finding[] {
 
   for (const [profile, bins] of Object.entries(old.binaries)) {
     const now = next.binaries[profile] ?? {};
+    const renamedTo = new Set<string>();
     for (const [bin, owner] of Object.entries(bins)) {
       const nowOwner = now[bin];
-      if (!nowOwner) {
+      const renamed = nowOwner ? undefined : versionedRename(bin, owner, bins, now);
+      if (renamed) {
+        renamedTo.add(renamed);
+        findings.push({ severity: "info", kind: "binary-renamed", subject: `${profile}/${bin}`, detail: `${renamed} (${now[renamed]})` });
+      } else if (!nowOwner) {
         findings.push({ severity: "fail", kind: "binary-removed", subject: `${profile}/${bin}`, detail: owner });
       } else if (parseDrvName(owner).pname !== parseDrvName(nowOwner).pname) {
         findings.push({ severity: "info", kind: "binary-owner", subject: `${profile}/${bin}`, detail: `${owner} → ${nowOwner}` });
       }
     }
     for (const bin of Object.keys(now)) {
-      if (!bins[bin]) {
+      if (!bins[bin] && !renamedTo.has(bin)) {
         findings.push({ severity: "info", kind: "binary-added", subject: `${profile}/${bin}`, detail: now[bin]! });
       }
     }
   }
   return findings;
+}
+
+/** Version suffix of a binary name: `perl5.42.0`, `python3.13`. */
+const VERSION_SUFFIX = /[\d.]+$/;
+
+/**
+ * A binary that only changed the version in its name, from the same package
+ * (`perl5.42.0` → `perl5.42.1`): a rename, not a removal.
+ */
+function versionedRename(bin: string, owner: string, old: Record<string, string>, now: Record<string, string>): string | undefined {
+  const stem = bin.replace(VERSION_SUFFIX, "");
+  if (stem === bin || !stem) return undefined;
+  const pname = parseDrvName(owner).pname;
+  return Object.keys(now).find(
+    (b) => !old[b] && b !== bin && b.replace(VERSION_SUFFIX, "") === stem && parseDrvName(now[b]!).pname === pname,
+  );
 }
 
 function sortKeys<T>(obj: Record<string, T>): Record<string, T> {
