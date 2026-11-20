@@ -205,7 +205,7 @@ Probes are deterministic and capture behaviour as JSON or text snapshots. The ag
 | T2 | Every enabled program with a known validator | The program's own check, from the validator registry | Any error or new warning |
 | T3 | Deep behaviour, built in for nvim, zsh, tmux, Alacritty | See below | Any removed or changed keymap/alias/binding, startup error |
 
-Coverage follows the config: every enabled program gets the generic tiers plus its effective option values and a starts-cleanly check; deep probes are extras (ADR 0001). Every deciding comparison builds both sides now and differs in one thing only; committed snapshots are history (ADR 0002).
+Coverage follows the config: every enabled program gets the generic tiers (packages, rendered files) and, where it has an obvious binary, a starts-cleanly check; deep probes are extras (ADR 0001); option values are not probed (ADR 0003). Every deciding comparison builds both sides now and differs in one thing only; committed snapshots are history (ADR 0002).
 
 Validator registry (T2), extendable per repo in `.flake-agent/probes/`:
 
