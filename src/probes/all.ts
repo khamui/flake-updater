@@ -63,6 +63,24 @@ export async function probeAll(repo: string, target: Target, against: string, to
   };
 }
 
+/**
+ * Snapshot one system (main's build, when main has no snapshots yet) into
+ * `<repo>/.flake-agent/snapshots/<host>/`, so later snapshots have a baseline.
+ */
+export async function snapshotSystem(repo: string, target: Target, toplevel: string): Promise<string[]> {
+  const programs = await discoverPrograms(target);
+  const validators = selectValidators(programs, [...BUILTIN_VALIDATORS, ...(await loadCustomValidators(repo))]);
+  const [t0, t1] = await Promise.all([snapshotT0(nixStore, toplevel, target.user), snapshotT1(nixStore, toplevel, target.user)]);
+  const t2 = await snapshotT2(toplevel, target.user, validators);
+  const t3 = await snapshotT3(toplevel, target.user, selectDeepProbes(programs, DEEP_PROBES));
+  return [
+    await writeSnapshot(repo, target.host, "t0", t0),
+    await writeSnapshot(repo, target.host, "t1", t1),
+    await writeSnapshot(repo, target.host, "t2", t2),
+    await writeSnapshot(repo, target.host, "t3", t3),
+  ];
+}
+
 export function probeFailures(r: ProbeRun): Finding[] {
   return [...r.t0, ...r.t2, ...r.t3].filter((f) => f.severity === "fail");
 }

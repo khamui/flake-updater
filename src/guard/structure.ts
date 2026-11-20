@@ -134,9 +134,9 @@ export function lockViolations(beforeText: string, afterText: string, selfInput 
   return reasons;
 }
 
-/** Paths that don't count towards the diff limit. */
+/** Paths that don't count towards the diff limit: the lock, and records nothing evaluates (snapshots, CHANGES.md, keep-old patches and notes). */
 export function countsTowardsLimit(path: string): boolean {
-  return path !== "flake.lock" && !path.startsWith(".flake-agent/snapshots/");
+  return path !== "flake.lock" && path !== ".flake-agent/CHANGES.md" && !path.startsWith(".flake-agent/snapshots/") && !/^\.flake-agent\/changes\/[^/]+\/(keep-old\.patch|notes\.md)$/.test(path);
 }
 
 /** From `git diff --numstat`: added + deleted lines, excluding the lock and snapshots. */
