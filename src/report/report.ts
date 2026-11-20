@@ -75,6 +75,7 @@ function switchReport(run: RunRecord | undefined, rec: SwitchRecord, handoffNote
   })();
   const lines = [head];
   if (run) lines.push(summaryLine(run), "", ...body(run));
+  if (rec.source === "user") lines.push(`  ↩ reverted ${rec.branch.replace(/^agent\/revert-/, "")} (flake-agent revert)`);
   if (rec.result === "needs-review" || rec.rolledBack) lines.push("", `  Branch:   ${rec.branch}`);
   if (handoffNote && rec.result === "switched" && !rec.rolledBack) lines.push("", `  Repo:     ${handoffNote}`);
   return lines.join("\n") + "\n";

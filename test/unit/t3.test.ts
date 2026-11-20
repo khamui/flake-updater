@@ -48,6 +48,18 @@ describe("neovim deep probe", () => {
     expect(kinds(base, next)).toEqual([["fail", "nvim-lsp-missing", "nil"]]);
   });
 
+  it("fails when a server attaches to fewer filetypes or changes whether it needs a workspace root", () => {
+    const tw = (filetypes: string[], workspaceRequired: boolean) => ({ cmd: "tw", resolves: true, filetypes, workspaceRequired });
+    const old = { ...base, lsp: { tailwindcss: tw(["css", "html"], false) } };
+    expect(kinds(old, { ...base, lsp: { tailwindcss: tw(["css", "svelte"], true) } })).toEqual([
+      ["fail", "nvim-lsp-filetypes-removed", "tailwindcss"],
+      ["info", "nvim-lsp-filetypes-added", "tailwindcss"],
+      ["fail", "nvim-lsp-workspace", "tailwindcss"],
+    ]);
+    // snapshots from before these were captured compare as unchanged
+    expect(kinds(base, { ...base, lsp: { ...base.lsp, nil: { ...base.lsp.nil!, filetypes: ["nix"], workspaceRequired: true } } })).toEqual([]);
+  });
+
   it("fails on any startup error, even one the old config had", () => {
     const broken = { ...base, startup: { errors: ["E5113: Lua chunk: init.lua:2: boom"], warnings: [] } };
     expect(kinds(broken, broken)).toEqual([["fail", "nvim-startup-error", "neovim"]]);
