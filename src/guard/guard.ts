@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { configAttr } from "../discovery/discover.js";
 import { run } from "../nix/exec.js";
 import { GUARD_NIX } from "./expr.js";
-import { flagViolations } from "./flags.js";
+import { flagViolations, renderedFlagViolations } from "./flags.js";
 import { diffSizeViolations, lockViolations, writeScopeViolations, type FileChange, type WriteScope } from "./structure.js";
 
 export type Guarded = Record<string, unknown>;
@@ -44,9 +44,11 @@ const SOURCE_PATH = /\/nix\/store\/[0-9a-z]{32}-source\//g;
  * Aggregates whose path changes whenever anything inside them does (e.g. the
  * etc tree after an HM-only edit, referenced by the `etc` activation script).
  * Their contents are guarded on their own (etc keys, rendered files, unit names).
+ * AppArmor include files embed the store paths of /etc files (bashrc, profile, …),
+ * so any shell-init edit changes them; their keys stay guarded.
  */
 const AGGREGATE_PATH =
-  /\/nix\/store\/[0-9a-z]{32}-(etc|system-units|user-units|system-path|home-manager-generation|home-manager-files|home-manager-path)(?=[/\s"']|$)/g;
+  /\/nix\/store\/[0-9a-z]{32}-(etc|system-units|user-units|system-path|home-manager-generation|home-manager-files|home-manager-path|abstractions-[\w.-]+|tunables-[\w.-]+)(?=[/\s"']|$)/g;
 
 function normalise(value: unknown): unknown {
   if (typeof value === "string") return value.replace(SOURCE_PATH, "<source>/").replace(AGGREGATE_PATH, "/nix/store/<$1>");
@@ -193,11 +195,13 @@ export async function runGuard(opts: GuardOptions): Promise<GuardResult> {
     await writeFile(join(baseDir, "flake.lock"), await run("git", ["-C", opts.repo, "show", `${rev}:flake.lock`]));
 
     try {
-      const [baseline, agent] = await Promise.all([
+      const [{ scan: baseScan, ...baseline }, { scan: agentScan, ...agent }] = await Promise.all([
         evalGuarded(baseDir, opts.host, opts.user),
         evalGuarded(revDir, opts.host, opts.user),
       ]);
       reasons.push(...compareGuarded(baseline, agent));
+      // init files are scanned, not compared: a legitimate fix may change them
+      reasons.push(...renderedFlagViolations((baseScan ?? {}) as Record<string, string | null>, (agentScan ?? {}) as Record<string, string | null>));
     } catch (err) {
       // what can't be evaluated can't be checked
       reasons.push(`eval: ${(err as Error).message.split("\n").slice(-3).join(" ").slice(0, 300)}`);

