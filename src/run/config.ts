@@ -18,6 +18,10 @@ export interface AgentConfig {
   writeScope: WriteScope;
   /** Live system the probes compare against. */
   against: string;
+  /** A live switch waits for this much user idle time... */
+  idleMinutes: number;
+  /** ...for at most this long, then only the boot entry is set. */
+  idleFallbackHours: number;
 }
 
 export const DEFAULTS: Omit<AgentConfig, "repo" | "host" | "user"> = {
@@ -30,6 +34,8 @@ export const DEFAULTS: Omit<AgentConfig, "repo" | "host" | "user"> = {
   selfInput: DEFAULT_SELF_INPUT,
   writeScope: { allow: [], deny: [] },
   against: "/run/current-system",
+  idleMinutes: 15,
+  idleFallbackHours: 24,
 };
 
 export async function loadConfig(path: string | undefined, overrides: Partial<AgentConfig>): Promise<AgentConfig> {

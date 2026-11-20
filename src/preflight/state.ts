@@ -14,6 +14,8 @@ export interface RunState {
   /** A failed run waiting for the user's choice: retry now or wait for the next cycle. */
   pending?: { since: string; failure: PreflightFailure };
   lastRun?: RunRecord;
+  /** Branches main moved past; kept, never resumed. */
+  superseded?: { branch: string; at: string }[];
 }
 
 export class StateStore {
