@@ -45,7 +45,9 @@ buildNpmPackage {
     rm -rf $out/lib/node_modules/flake-agent/node_modules/@anthropic-ai/claude-agent-sdk-*
     wrapProgram $out/bin/flake-agent \
       --prefix PATH : ${lib.makeBinPath [nvd git gnutar diffutils bubblewrap xvfb]} \
-      --set-default FLAKE_AGENT_CLAUDE ${lib.getExe claude-code}
+      --set-default FLAKE_AGENT_CLAUDE ${lib.getExe claude-code} \
+      `# the agent runs flake-agent keep-old from its sessions` \
+      --prefix PATH : $out/bin
   '';
 
   meta = {

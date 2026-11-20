@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { checkBash, checkFetch, checkWrite, DOC_HOSTS, githubRepos, type HookContext } from "../../src/agent/hooks.js";
-import { fixLoop, modelFor, type Verification } from "../../src/agent/loop.js";
+import { blockedInputs, fixLoop, modelFor, type Verification } from "../../src/agent/loop.js";
 import { parseLog, trailerProblems } from "../../src/agent/trailers.js";
 import { DEFAULTS, type AgentConfig } from "../../src/run/config.js";
 
@@ -130,8 +130,15 @@ describe("fix loop", () => {
   it("is blocked when still red after 3 iterations", async () => {
     const runAgent = vi.fn(async () => ({ summary: "tried" }));
     const outcome = await fixLoop(cfg, red, { runAgent, verify: async () => red, out: () => {}, head: async () => String(++commits) });
-    expect(outcome).toEqual({ status: "blocked", iterations: 3, problems: red.problems });
+    expect(outcome).toEqual({ status: "blocked", iterations: 3, problems: red.problems, blockedInputs: [] });
     expect(runAgent.mock.calls.map((c) => c[1])).toEqual(["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
+  });
+
+  it("stops early on an input the agent names as broken upstream", async () => {
+    const runAgent = vi.fn(async () => ({ summary: "Renamed languages.ts.\n\n- **Blocked input:** tools — upstream build fails" }));
+    const outcome = await fixLoop(cfg, red, { runAgent, verify: async () => red, out: () => {}, head: async () => String(++commits) });
+    expect(outcome).toEqual({ status: "blocked", iterations: 1, problems: red.problems, blockedInputs: ["tools"] });
+    expect(blockedInputs("Blocked input: nvf — x\nblocked input: home-manager - y\nno Blocked input here")).toEqual(["nvf", "home-manager"]);
   });
 
   it("stops at once when the subscription becomes unusable", async () => {

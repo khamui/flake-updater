@@ -22,10 +22,16 @@ export interface FixDeps {
 
 export type FixOutcome =
   | { status: "green"; iterations: number }
-  | { status: "blocked"; iterations: number; problems: string }
+  /** `blockedInputs`: what the agent named as broken upstream ("Blocked input: <name> — …"). */
+  | { status: "blocked"; iterations: number; problems: string; blockedInputs: string[] }
   /** Builds; the remaining probe findings are upstream's own changes, left as they are. */
   | { status: "upstream-only"; iterations: number; problems: string }
   | { status: "interrupted"; iterations: number; failure: PreflightFailure };
+
+/** Inputs the agent's final answer names as broken upstream. */
+export function blockedInputs(summary: string): string[] {
+  return [...summary.matchAll(/^\W*Blocked input:\W*([A-Za-z0-9_-]+)/gim)].map((m) => m[1]!);
+}
 
 /** Which model iteration `i` (1-based) uses: the escalation model on the last one. */
 export function modelFor(i: number, cfg: Pick<AgentConfig, "model" | "escalationModel" | "maxFixIterations">): string {
@@ -40,12 +46,19 @@ Rules:
 - Read .flake-agent/PREFERENCES.md first if it exists, and follow it.
 - Verify with: nix build .#nixosConfigurations.${cfg.host}.config.system.build.toplevel --no-link
 - Find out why upstream changed (release notes, changelogs, commits, issues) with WebFetch: the NixOS and home-manager manuals, and the GitHub repositories of this flake's inputs. Nothing else is reachable.
-- Commit each logical change on its own: git add <files> && git commit -m "<message>". The message has a subject line, then a body saying what changed upstream, what you changed here, and which behaviours differ, then these trailers:
+- Commit each logical change on its own: git add <files> && git commit -F - <<'EOF' … EOF (a quoted here-document; redirections, command substitution and files outside the repository are refused). The message has a subject line, then a body saying what changed upstream, what you changed here, and which behaviours differ, then these trailers:
     Change-Id: <short-slug>-${month}
-    Change-Class: mechanical
+    Change-Class: <mechanical|behaviour|review>
     Upstream: <link to the upstream change>
-- This run handles mechanical changes only: renames and moves that keep behaviour identical. If a fix would change behaviour, do not commit it; describe it in your final answer instead.
-- Some probe findings are upstream's own changes that no configuration change can or should restore (a package dropping or renaming a binary, a changed default). Leave those alone: no commit, and list them in your final answer under "Upstream-only:". If everything left is upstream-only, make no commit at all.
+- Classify each change:
+  - One commit per upstream change: two removed or renamed options are two commits, even in the same file.
+  - mechanical: a rename or move that keeps behaviour identical.
+  - A removed option or module replaced by a different one (a preset, a new module, another package) is behaviour unless you compared the replacement's defaults with the old ones (filetypes, root detection, settings, enabled features) and they match; say in the commit body what you compared.
+  - behaviour: upstream removed or changed something and the new way behaves differently. Adopt the new way (or remove the feature if there is no replacement) in one commit. Then prepare the way back: edit the tree to the closest old-behaviour version on top of that commit, verify it builds, run \`flake-agent keep-old <change-id>\` (it saves .flake-agent/changes/<change-id>/keep-old.patch and restores the tree), write .flake-agent/changes/<change-id>/notes.md (what changed upstream, what differs for the user, what the patch restores), and commit both with the same trailers.
+  - review: anything touching hashes (outputHash, vendorHash, npmDepsHash, pnpmDeps …), overlays, fetchers or overrides. Commit it; a human reviews it before it is switched.
+- An override or workaround that is no longer needed: propose removing it as its own commit (Change-Class: review).
+- An input that is broken upstream in a way the configuration cannot work around: do not remove the feature to hide it. Make no commit for it and say in your final answer: "Blocked input: <name> — <reason>". The run then keeps that input at its previous revision.
+- Some probe findings are upstream's own changes that no configuration change can or should restore (a package dropping or renaming a binary, a changed default). Leave those alone: no commit, and list them in your final answer under "Upstream-only:". Never commit a change that only restates the new default (e.g. setting an option to the value it now defaults to); that is upstream-only too. If everything left is upstream-only, make no commit at all.
 - Never update ${cfg.selfInput}, never push, never touch other branches.
 - Finish with a short summary of what you changed and why.`;
 }
@@ -72,6 +85,7 @@ export async function fixLoop(
   preferences?: string,
 ): Promise<FixOutcome> {
   let v = initial;
+  const named = new Set<string>();
   for (let i = 1; i <= cfg.maxFixIterations; i++) {
     if (v.status === "green") return { status: "green", iterations: i - 1 };
     const model = modelFor(i, cfg);
@@ -79,14 +93,18 @@ export async function fixLoop(
     const before = await deps.head();
     const r = await deps.runAgent(prompt(v, i, preferences), model, i);
     if (r.quota) return { status: "interrupted", iterations: i, failure: r.quota };
+    if (r.summary.trim()) deps.out(`${r.summary.trim().replace(/^/gm, "  | ")}\n`);
+    for (const input of blockedInputs(r.summary)) named.add(input);
     const committed = (await deps.head()) !== before;
     v = await deps.verify();
     // builds, and the agent found nothing to change: what is left is upstream's doing
     if (v.status === "probes-red" && !committed) return { status: "upstream-only", iterations: i, problems: v.problems };
+    // broken upstream: more sessions can't help; the run pins the input, then the agent gets another pass
+    if (v.status === "build-failed" && named.size) return { status: "blocked", iterations: i, problems: v.problems, blockedInputs: [...named] };
   }
   return v.status === "green"
     ? { status: "green", iterations: cfg.maxFixIterations }
-    : { status: "blocked", iterations: cfg.maxFixIterations, problems: v.problems };
+    : { status: "blocked", iterations: cfg.maxFixIterations, problems: v.problems, blockedInputs: [...named] };
 }
 
 export const AGENT_TOOLS = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"];

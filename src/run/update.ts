@@ -7,6 +7,9 @@ import { probeAll, probeFailures, type ProbeRun } from "../probes/all.js";
 import type { AgentConfig } from "./config.js";
 import type { FixOutcome, Verification } from "../agent/loop.js";
 import { parseLog, trailerProblems, type ChangeCommit } from "../agent/trailers.js";
+import { changeDir, withPatched } from "../agent/keepold.js";
+import { previousRef } from "./pin.js";
+import type { Target } from "../discovery/discover.js";
 
 export type RunStatus = "up-to-date" | "build-failed" | "probes-red" | "green" | "locked" | "blocked" | "interrupted";
 
@@ -22,6 +25,10 @@ export interface RunRecord {
   lockCommit?: string;
   /** Upstream-only findings left as they are (not failures), for the report. */
   behaviourChanges?: string[];
+  /** Inputs kept at their previous revision because they are broken upstream. */
+  pinned?: string[];
+  /** Each behaviour change's way back, built and probed on the final commit. */
+  keepOld?: KeepOldResult[];
   changes?: { sha: string; subject: string; id?: string; class?: string }[];
   /** main when the run branched. */
   base?: string;
@@ -207,29 +214,73 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
     let status: RunStatus = v.status;
     let detail: string | undefined;
     let behaviourChanges: string[] | undefined;
-    if (v.status !== "green" && deps.fix) {
-      const outcome = await deps.fix(v, { repo: dir, verify: async () => (v = await verify()), head: () => git.run("rev-parse", "HEAD") });
-      if (outcome.status === "green") status = "green";
-      else if (outcome.status === "upstream-only") {
+    let pinned: string[] | undefined;
+    const ctx = { repo: dir, verify: async () => (v = await verify()), head: () => git.run("rev-parse", "HEAD") };
+    /** Map a fix-loop outcome onto the run's status. */
+    const settle = (outcome: FixOutcome): void => {
+      if (outcome.status === "green") {
+        status = "green";
+        detail = undefined;
+      } else if (outcome.status === "upstream-only") {
         // not a failure (SPEC: upstream-only changes): switchable, reported as behaviour changes
         status = "green";
+        detail = undefined;
         behaviourChanges = outcome.problems.split("\n").filter(Boolean);
-      }
-      else if (outcome.status === "interrupted") {
+      } else if (outcome.status === "interrupted") {
         status = "interrupted";
         detail = outcome.failure.message;
       } else {
         status = "blocked";
         detail = tail(outcome.problems, 3);
       }
+    };
+
+    if (v.status !== "green" && deps.fix) {
+      const outcome = await deps.fix(v, ctx);
+      settle(outcome);
+      if (outcome.status === "blocked") {
+        // partial update: keep one input at its previous revision, update the rest
+        const baseLock = await git.run("show", `${base}:flake.lock`);
+        // the inputs the agent named as broken upstream first: each try is a full build
+        const named = outcome.blockedInputs.filter((i) => inputs.includes(i));
+        for (const input of [...named, ...inputs.filter((i) => !named.includes(i))]) {
+          const prev = previousRef(baseLock, input);
+          if (!prev) continue;
+          await run("nix", ["flake", "lock", dir, "--override-input", input, prev]);
+          if ((await git.run("status", "--porcelain", "flake.lock")) === "") continue;
+          await git.run("add", "flake.lock");
+          await git.run("commit", "-q", "-m", pinMessage(input, prev, outcome.problems, now));
+          const pin = await git.run("rev-parse", "HEAD");
+          deps.out(`Trying ${input} at its previous revision\n`);
+          const after = await ctx.verify();
+          if (after.status === "build-failed") {
+            await git.run("reset", "-q", "--hard", `${pin}^`);
+            continue;
+          }
+          pinned = [input];
+          if (after.status === "green") settle({ status: "green", iterations: 0 });
+          // builds now: what the probes report is new to the agent, so it gets another pass
+          else settle(await deps.fix(after, ctx));
+          break;
+        }
+      }
     } else if (v.status === "build-failed") {
       detail = tail(v.problems, 1);
     }
 
     let changes: ChangeCommit[] = [];
+    const keepOld: KeepOldResult[] = [];
     if (deps.fix) {
       changes = parseLog(await git.run("log", "--reverse", "--format=%H%x00%B%x01", `${lockCommit}..HEAD`)).filter((c) => !c.subject.startsWith("snapshots: "));
       const issues = trailerProblems(changes);
+      for (const change of changes.filter((c) => c.trailers["Change-Class"] === "behaviour")) {
+        const id = change.trailers["Change-Id"]!;
+        if (keepOld.some((k) => k.id === id)) continue;
+        keepOld.push(await verifyKeepOld(dir, id, target, against, behaviourChanges ?? []));
+      }
+      for (const k of keepOld) {
+        if (!k.builds || !k.probesGreen) issues.push(`keep-old.patch for ${k.id}: ${k.problem}`);
+      }
       if (issues.length && status === "green") {
         // an unlabelled change can't be reported or reverted: a human has to look
         status = "blocked";
@@ -256,8 +307,63 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
       changes: changes.map((c) => ({ sha: c.sha, subject: c.subject, id: c.trailers["Change-Id"], class: c.trailers["Change-Class"] })),
       ...(detail ? { detail } : {}),
       ...(behaviourChanges ? { behaviourChanges } : {}),
+      ...(pinned ? { pinned } : {}),
+      ...(keepOld.length ? { keepOld } : {}),
     };
   } finally {
     await release();
   }
+}
+
+export interface KeepOldResult {
+  id: string;
+  builds: boolean;
+  probesGreen: boolean;
+  problem?: string;
+}
+
+/** Probe findings not among the upstream-only ones the run already accepted. */
+export function newFindings(found: string, accepted: string[]): string[] {
+  return found.split("\n").filter((l) => l && !accepted.includes(l));
+}
+
+/**
+ * Apply a behaviour change's keep-old.patch to HEAD in a scratch worktree, build
+ * and probe it. Upstream-only findings show up on every tree; anything else is red.
+ */
+async function verifyKeepOld(dir: string, id: string, target: Target, against: string, accepted: string[]): Promise<KeepOldResult> {
+  const patch = join(changeDir(dir, id), "keep-old.patch");
+  if (!(await exists(patch))) return { id, builds: false, probesGreen: false, problem: "missing" };
+  try {
+    return await withPatched(dir, "HEAD", patch, async (wt) => {
+      const t = { ...target, flake: wt };
+      const built = await capture("nix", ["build", "--no-link", "--print-out-paths", configAttr(t, "config.system.build.toplevel")], {
+        env: process.env as Record<string, string>,
+        timeoutMs: 50 * 60_000,
+      });
+      if (built.code !== 0) return { id, builds: false, probesGreen: false, problem: `does not build: ${tail(built.stderr, 1)}` };
+      const probes = await probeAll(wt, t, against, built.stdout.trim().split("\n").at(-1)!);
+      const failing = newFindings(problems(probes), accepted);
+      return failing.length
+        ? { id, builds: true, probesGreen: false, problem: failing[0] }
+        : { id, builds: true, probesGreen: true };
+    });
+  } catch (err) {
+    return { id, builds: false, probesGreen: false, problem: (err as Error).message };
+  }
+}
+
+export function pinMessage(input: string, ref: string, why: string, now: Date): string {
+  return [
+    `flake.lock: keep ${input} at its previous revision`,
+    "",
+    `${input} is broken upstream in a way the configuration cannot work around:`,
+    tail(why, 5),
+    "",
+    `The rest of the update goes ahead; ${input} stays at ${ref}.`,
+    "",
+    `Change-Id: pin-${input.toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${now.toISOString().slice(0, 7)}`,
+    "Change-Class: blocked",
+    `Upstream: ${ref}`,
+  ].join("\n");
 }

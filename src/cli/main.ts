@@ -14,6 +14,7 @@ import { loadConfig } from "../run/config.js";
 import { superseded, updateRun, type UpdateDeps } from "../run/update.js";
 import { DOC_HOSTS, githubRepos } from "../agent/hooks.js";
 import { fixLoop, runAgentSession } from "../agent/loop.js";
+import { captureKeepOld } from "../agent/keepold.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
 import { decideMode, realDeps, switchService } from "../switch/switch.js";
 import { realRollbackDeps, rollbackService } from "../switch/rollback.js";
@@ -44,6 +45,7 @@ Commands:
   gc          (root) nix-collect-garbage that keeps the newest --keep-system generations
   helper      (user session) Idle time, notifications, post-switch check, handoff
   rollback    (root) Undo the agent's last live switch when the helper asks
+  keep-old <id>  (agent) Save the working-tree diff as .flake-agent/changes/<id>/keep-old.patch
 
 Options:
   --repo <path>     Config repo (default: current directory)
@@ -185,6 +187,15 @@ async function main(argv: string[]): Promise<number> {
         await new Promise((r) => setTimeout(r, 60_000));
       }
     }
+    case "keep-old": {
+      // run by the agent in its clone, after editing the tree to the old behaviour
+      if (!positionals[1]) {
+        process.stderr.write("keep-old: missing <change-id>\n");
+        return 2;
+      }
+      process.stdout.write(`Saved ${await captureKeepOld(process.cwd(), positionals[1])}; working tree restored\n`);
+      return 0;
+    }
     case "rollback":
       return (await rollbackService(SWITCH_STATE, realRollbackDeps((t) => process.stdout.write(t)))) ? 0 : 1;
     case "run":
@@ -275,7 +286,12 @@ async function main(argv: string[]): Promise<number> {
         await state.update((s) => {
           const old = superseded(s.lastRun, record);
           if (old) out(`main moved: ${old} superseded\n`);
-          return { ...s, lastRun: record, superseded: old ? [...(s.superseded ?? []), { branch: old, at: record.at }] : s.superseded };
+          // the subscription stopped mid-run: same retry/next-cycle choice as a failed preflight
+          const pending =
+            record.status === "interrupted"
+              ? { since: record.at, failure: { reason: "quota" as const, message: `Run interrupted: ${record.detail ?? "subscription unusable"}` } }
+              : s.pending;
+          return { ...s, lastRun: record, pending, superseded: old ? [...(s.superseded ?? []), { branch: old, at: record.at }] : s.superseded };
         });
         return record.status === "green" || record.status === "up-to-date" ? 0 : 1;
       };

@@ -108,7 +108,9 @@ export function checkSegment(segment: string, ctx: Pick<HookContext, "selfInput"
     if (cmd === "find" && w.some((x) => ["-exec", "-execdir", "-delete", "-ok"].includes(x))) return "find with -exec/-delete is not allowed";
     return null;
   }
-  if (cmd === "nvd" || cmd === "flake-agent") return cmd === "flake-agent" && sub !== "probe" && sub !== "guard" ? "flake-agent: only probe and guard" : null;
+  if (cmd === "nvd" || cmd === "flake-agent") {
+    return cmd === "flake-agent" && !["probe", "guard", "keep-old"].includes(sub ?? "") ? "flake-agent: only probe, guard and keep-old" : null;
+  }
   if (cmd === "git") {
     if (!sub || !GIT_ALLOWED.has(sub)) return `git ${sub ?? ""}: not allowed (no push, reset, checkout, branch, rebase…)`;
     if (w.includes("--amend") || w.includes("--no-verify")) return "git commit --amend/--no-verify is not allowed";
