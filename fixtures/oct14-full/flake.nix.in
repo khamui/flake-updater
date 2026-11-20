@@ -1,0 +1,29 @@
+{
+  description = "flake-agent fixture: the Oct 14 update — nvf from before 2026-04-15, a vendor hash workaround, a tools input that breaks upstream";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nvf.url = "github:notashelf/nvf";
+    nvf.inputs.nixpkgs.follows = "nixpkgs";
+    vendor.url = "git+file://@UPSTREAM@/vendor";
+    tools.url = "git+file://@UPSTREAM@/tools";
+  };
+
+  outputs = {
+    nixpkgs,
+    nvf,
+    vendor,
+    tools,
+    ...
+  }: {
+    nixosConfigurations.fixture = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        nvf.nixosModules.default
+        # upstream overlays first, so the configuration can override them
+        ({lib, ...}: {nixpkgs.overlays = lib.mkBefore [vendor.overlays.default tools.overlays.default];})
+        ./configuration.nix
+      ];
+    };
+  };
+}
