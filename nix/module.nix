@@ -12,7 +12,7 @@ self: {
   stateDir = "/var/lib/flake-agent";
 
   agentConfig = pkgs.writeText "flake-agent.json" (builtins.toJSON {
-    inherit (cfg) repo host user mainBranch model escalationModel maxFixIterations diffLimit minFreeGB selfInput writeScope;
+    inherit (cfg) repo host user mainBranch model escalationModel maxFixIterations diffLimit minFreeGB selfInput writeScope idleMinutes idleFallbackHours;
   });
 in {
   options.services.flake-agent = {
@@ -170,6 +170,7 @@ in {
         ExecStart = "${lib.getExe cfg.package} run --config ${agentConfig}";
         TimeoutStartSec = cfg.timeout;
         StateDirectory = "flake-agent";
+        # readable by the flake-agent group (the user): state, report, clone
         StateDirectoryMode = "0750";
         WorkingDirectory = stateDir;
         LoadCredential = "claude-token:${cfg.tokenFile}";
@@ -199,10 +200,11 @@ in {
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${lib.getExe cfg.package} switch --config ${agentConfig} --state-dir ${stateDir} --switch-state-dir /var/lib/flake-agent-switch";
+        Group = "flake-agent";
         StateDirectory = "flake-agent-switch";
-        StateDirectoryMode = "0700";
-        # a switch can take long, and must not be killed half-way
-        TimeoutStartSec = "3h";
+        StateDirectoryMode = "0750";
+        # waits up to idleFallbackHours for the user to be idle, then builds and switches
+        TimeoutStartSec = "${toString (cfg.idleFallbackHours + 2)}h";
       };
     };
 
@@ -211,6 +213,54 @@ in {
       wantedBy = ["paths.target"];
       pathConfig.PathExists = "${stateDir}/switch-request.json";
     };
+
+    # The user reads agent and switch state (status, notifications, handoff).
+    users.users.${cfg.user}.extraGroups = ["flake-agent"];
+
+    # The helper publishes idle time and rollback requests here.
+    systemd.tmpfiles.rules = ["d /run/flake-agent 0755 ${cfg.user} flake-agent -"];
+
+    # Root: undoes the agent's last live switch when the helper's post-switch check fails.
+    systemd.services.flake-agent-rollback = {
+      description = "flake-agent rollback after a failed post-switch check";
+      path = [config.nix.package];
+      serviceConfig = {
+        Type = "oneshot";
+        Group = "flake-agent";
+        ExecStart = "${lib.getExe cfg.package} rollback";
+      };
+    };
+    systemd.paths.flake-agent-rollback = {
+      wantedBy = ["paths.target"];
+      pathConfig.PathExists = "/run/flake-agent/rollback-request.json";
+    };
+
+    # In the user's session: idle time, notifications, post-switch check, handoff.
+    systemd.user.services.flake-agent-helper = {
+      description = "flake-agent user helper";
+      wantedBy = ["graphical-session.target"];
+      partOf = ["graphical-session.target"];
+      unitConfig.ConditionUser = cfg.user;
+      path = [pkgs.xprintidle pkgs.libnotify pkgs.git config.nix.package];
+      serviceConfig = {
+        ExecStart = "${lib.getExe cfg.package} helper --config ${agentConfig}";
+        Restart = "always";
+        RestartSec = 30;
+      };
+    };
+
+    # "Retry now": the user may start a run, nothing else.
+    security.polkit.enable = lib.mkDefault true;
+    security.polkit.extraConfig = ''
+      polkit.addRule(function (action, subject) {
+        if (action.id == "org.freedesktop.systemd1.manage-units" &&
+            action.lookup("unit") == "flake-agent.service" &&
+            action.lookup("verb") == "start" &&
+            subject.user == "${cfg.user}") {
+          return polkit.Result.YES;
+        }
+      });
+    '';
 
     # Retention: GC never deletes the newest minGenerations system generations.
     systemd.services.nix-gc = mkIf config.nix.gc.automatic {

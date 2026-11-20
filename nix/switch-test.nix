@@ -11,6 +11,8 @@ pkgs.testers.runNixOSTest {
   nodes.machine = {pkgs, ...}: {
     imports = [self.nixosModules.default];
     virtualisation.memorySize = 2048;
+    # activating the base system would install GRUB onto the virtual disk, which fails in the VM
+    boot.loader.grub.enable = false;
 
     services.flake-agent = {
       enable = true;
@@ -32,6 +34,9 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import json
+    import shlex
+
     machine.wait_for_unit("multi-user.target")
     current = machine.succeed("readlink -f /run/current-system").strip()
     kernel = machine.succeed("readlink -f /run/current-system/kernel").strip()
@@ -49,6 +54,39 @@ pkgs.testers.runNixOSTest {
         assert "boot: generation 1 → 2" in out, out
         assert machine.succeed("readlink -f /run/current-system/kernel").strip() == kernel
         assert machine.succeed("readlink -f /nix/var/nix/profiles/system/kernel").strip() != kernel
+
+    with subtest("a failed post-switch check rolls back the agent's last live switch"):
+        out = machine.succeed(f"flake-agent activate {current}")
+        print(out)
+        assert "switch: generation 2 → 3" in out, out
+        machine.fail("test -e /etc/flake-agent-test")
+        sha = "c" * 40
+        record = {"at": "t", "commit": sha, "branch": "agent/x", "result": "switched", "mode": "switch", "from": 1, "to": 3}
+        # as the switch service would have recorded it
+        machine.succeed("mkdir -p /var/lib/flake-agent-switch")
+        machine.succeed(f"echo {shlex.quote(json.dumps(record))} > /var/lib/flake-agent-switch/last-switch.json")
+
+        def request_rollback(commit):
+            req = shlex.quote(json.dumps({"commit": commit, "reason": "nvim-startup-error"}))
+            machine.succeed(f"su alice -c {shlex.quote(f'echo {req} > /run/flake-agent/rollback-request.json')}")
+            machine.wait_until_fails("test -e /run/flake-agent/rollback-request.json")
+
+        # a request for another commit is refused
+        request_rollback("d" * 40)
+        machine.succeed("journalctl -u flake-agent-rollback | grep -F 'Rollback refused: request is for another commit'")
+        assert machine.succeed("readlink /nix/var/nix/profiles/system").strip() == "system-3-link"
+
+        # the helper's request for the switched commit rolls back
+        request_rollback(sha)
+        machine.wait_until_succeeds("journalctl -u flake-agent-rollback | grep -F 'Rolled back: generation 3 → 1'")
+        assert machine.succeed("readlink /nix/var/nix/profiles/system").strip() == "system-1-link"
+        machine.succeed("grep -x new /etc/flake-agent-test")
+        machine.succeed("grep -F rolledBack /var/lib/flake-agent-switch/last-switch.json")
+
+    with subtest("the user may start a run (Retry now), nothing else"):
+        machine.succeed("su alice -c 'systemctl start --no-block flake-agent.service'")
+        machine.fail("su alice -c 'systemctl start --no-block nix-gc.service'")
+        machine.fail("su alice -c 'systemctl stop --no-block flake-agent.timer'")
 
     with subtest("GC with --delete-older-than 7d keeps 5 system generations"):
         machine.succeed("systemctl cat nix-gc.service | grep -o '/nix/store/[^ ]*-start' | head -1 | xargs cat | grep -F 'gc --delete-older-than 7d --keep-system 5'")

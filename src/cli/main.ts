@@ -1,18 +1,31 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
-import { resolve } from "node:path";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { configAttr, discoverPackages, type Target } from "../discovery/discover.js";
 import { formatProbeRun, nvdDiff, probeAll, probeFailures } from "../probes/all.js";
-import { run } from "../nix/exec.js";
+import { capture, run } from "../nix/exec.js";
 import { runGuard, type GuardOptions } from "../guard/guard.js";
 import { runCycle, skip, status } from "../preflight/cycle.js";
 import { preflight, realPreflight } from "../preflight/preflight.js";
 import { StateStore, defaultStateDir } from "../preflight/state.js";
 import { loadConfig } from "../run/config.js";
-import { updateRun } from "../run/update.js";
+import { superseded, updateRun } from "../run/update.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
 import { decideMode, realDeps, switchService } from "../switch/switch.js";
+import { realRollbackDeps, rollbackService } from "../switch/rollback.js";
+import { realHelperDeps, tick, type HelperState } from "../helper/helper.js";
+
+const AGENT_STATE = "/var/lib/flake-agent";
+const SWITCH_STATE = "/var/lib/flake-agent-switch";
+
+/** Is the NixOS module enabled on this system? */
+const isInstalled = () =>
+  access("/etc/systemd/system/flake-agent.service").then(
+    () => true,
+    () => false,
+  );
 
 const HELP = `Usage: flake-agent <command> [options]
 
@@ -27,6 +40,8 @@ Commands:
   switch      (root) Guard, build and switch/boot the commit the agent requested
   activate <toplevel>  (root) Set the system profile to <toplevel> and switch or boot
   gc          (root) nix-collect-garbage that keeps the newest --keep-system generations
+  helper      (user session) Idle time, notifications, post-switch check, handoff
+  rollback    (root) Undo the agent's last live switch when the helper asks
 
 Options:
   --repo <path>     Config repo (default: current directory)
@@ -78,6 +93,7 @@ async function main(argv: string[]): Promise<number> {
       "switch-state-dir": { type: "string" },
       "delete-older-than": { type: "string" },
       "keep-system": { type: "string" },
+      once: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -137,6 +153,7 @@ async function main(argv: string[]): Promise<number> {
       const applied = await deps.apply(toplevel, mode);
       const to = (await listGenerations(SYSTEM_PROFILE)).current;
       out(`${applied.ok ? mode : `${mode} failed, rolled back`}: generation ${from ?? "none"} → ${to}\n`);
+      if (applied.error) out(`${applied.error}\n`);
       return applied.ok ? 0 : 1;
     }
     case "gc":
@@ -146,12 +163,48 @@ async function main(argv: string[]): Promise<number> {
         out: (text) => process.stdout.write(text),
       });
       return 0;
+    case "helper": {
+      const cfg = await loadConfig(values.config, { host: values.host, user: values.user });
+      const deps = realHelperDeps(cfg, {
+        agentState: AGENT_STATE,
+        switchState: SWITCH_STATE,
+        helperState: join(defaultStateDir(), "helper.json"),
+      });
+      for (;;) {
+        const background = await tick(deps);
+        if (values.once) {
+          await Promise.all(background);
+          return 0;
+        }
+        await new Promise((r) => setTimeout(r, 60_000));
+      }
+    }
+    case "rollback":
+      return (await rollbackService(SWITCH_STATE, realRollbackDeps((t) => process.stdout.write(t)))) ? 0 : 1;
     case "run":
     case "retry":
     case "skip":
     case "status": {
       const state = new StateStore(values["state-dir"] ?? defaultStateDir());
       const out = (text: string) => process.stdout.write(text);
+      // with the module installed, a user's retry/skip act on the system service
+      if (!values["state-dir"] && process.getuid?.() !== 0 && (await isInstalled())) {
+        if (command === "retry") {
+          const r = await capture("systemctl", ["start", "--no-block", "flake-agent.service"], { env: process.env as Record<string, string> });
+          out(r.code === 0 ? "Run started: flake-agent.service\n" : `Could not start flake-agent.service: ${r.stderr.trim()}\n`);
+          return r.code === 0 ? 0 : 1;
+        }
+        if (command === "skip") {
+          const pending = (await new StateStore(AGENT_STATE).load()).pending;
+          const file = join(defaultStateDir(), "helper.json");
+          const s = JSON.parse(await readFile(file, "utf8").catch(() => "{}")) as HelperState;
+          await mkdir(dirname(file), { recursive: true });
+          await writeFile(file, JSON.stringify({ ...s, dismissedPending: pending?.since }, null, 2) + "\n");
+          out(pending ? "Skipped: the next scheduled cycle runs as usual.\n" : "Nothing pending.\n");
+          return 0;
+        }
+        if (command === "status") return status(new StateStore(AGENT_STATE), out);
+      }
       if (command === "skip") return skip(state, out);
       if (command === "status") return status(state, out);
       const cfg = await loadConfig(values.config, {
@@ -176,7 +229,11 @@ async function main(argv: string[]): Promise<number> {
       });
       const update = async () => {
         const record = await updateRun(cfg, state.dir, { out });
-        await state.update((s) => ({ ...s, lastRun: record }));
+        await state.update((s) => {
+          const old = superseded(s.lastRun, record);
+          if (old) out(`main moved: ${old} superseded\n`);
+          return { ...s, lastRun: record, superseded: old ? [...(s.superseded ?? []), { branch: old, at: record.at }] : s.superseded };
+        });
         return record.status === "green" || record.status === "up-to-date" ? 0 : 1;
       };
       // --no-preflight: exercise the AI-free run without a subscription (testing only)

@@ -4,6 +4,7 @@ import { capture, run } from "../nix/exec.js";
 import { runGuard, type GuardResult } from "../guard/guard.js";
 import type { AgentConfig } from "../run/config.js";
 import { cloneDir, requestPath, type SwitchRequest } from "../run/update.js";
+import { readIdle, waitForIdle } from "../helper/idle.js";
 import { SYSTEM_PROFILE, listGenerations } from "./generations.js";
 
 export type Mode = "switch" | "boot";
@@ -20,6 +21,11 @@ export interface SwitchRecord {
   toplevel?: string;
   reasons?: string[];
   detail?: string;
+  /** main when the agent branched: the handoff only fast-forwards from here. */
+  runBase?: string;
+  /** Not idle in time: boot entry set instead of a live switch. */
+  idleFallback?: boolean;
+  rolledBack?: { at: string; reason: string };
 }
 
 async function resolved(path: string): Promise<string | undefined> {
@@ -43,7 +49,8 @@ export async function readRequest(agentStateDir: string): Promise<SwitchRequest 
     const req = JSON.parse(await readFile(requestPath(agentStateDir), "utf8")) as Partial<SwitchRequest>;
     if (typeof req.commit !== "string" || !/^[0-9a-f]{40}$/.test(req.commit)) return undefined;
     if (typeof req.branch !== "string" || !/^agent\/[\w./-]+$/.test(req.branch)) return undefined;
-    return { commit: req.commit, branch: req.branch, at: String(req.at ?? "") };
+    const base = typeof req.base === "string" && /^[0-9a-f]{40}$/.test(req.base) ? req.base : undefined;
+    return { commit: req.commit, branch: req.branch, at: String(req.at ?? ""), ...(base ? { base } : {}) };
   } catch {
     return undefined;
   }
@@ -76,6 +83,8 @@ export interface SwitchDeps {
   apply: (toplevel: string, mode: Mode) => Promise<{ ok: boolean; error?: string }>;
   current: string;
   out: (text: string) => void;
+  /** Wait for the user to be idle before a live switch; absent = switch right away. */
+  waitForIdle?: () => Promise<"idle" | "timeout">;
 }
 
 export function realDeps(cfg: AgentConfig, out: (t: string) => void): SwitchDeps {
@@ -120,6 +129,7 @@ export function realDeps(cfg: AgentConfig, out: (t: string) => void): SwitchDeps
     },
     current: "/run/current-system",
     out,
+    waitForIdle: () => waitForIdle(() => readIdle(), { idleMinutes: cfg.idleMinutes, fallbackHours: cfg.idleFallbackHours }),
   };
 }
 
@@ -134,7 +144,7 @@ export async function switchCommit(
   deps: SwitchDeps,
   opts: { dryRun?: boolean } = {},
 ): Promise<SwitchRecord> {
-  const base = { at: new Date().toISOString(), commit: req.commit, branch: req.branch };
+  const base = { at: new Date().toISOString(), commit: req.commit, branch: req.branch, ...(req.base ? { runBase: req.base } : {}) };
   const verdict = await deps.guard(repo, req.commit);
   if (verdict.verdict !== "pass") {
     deps.out(`Needs review: guard blocked ${req.commit.slice(0, 12)}\n${verdict.reasons.map((r) => `  ${r}\n`).join("")}`);
@@ -146,11 +156,19 @@ export async function switchCommit(
     deps.out(`Build failed for ${req.commit.slice(0, 12)}\n`);
     return { ...base, result: "build-failed", detail: built.error };
   }
-  const mode = await decideMode(deps.current, built.toplevel);
+  let mode = await decideMode(deps.current, built.toplevel);
   const from = (await listGenerations(SYSTEM_PROFILE).catch(() => ({ current: undefined }))).current;
   if (opts.dryRun) {
     deps.out(`Would ${mode} to ${built.toplevel} (generation ${from ?? "?"} → next)\n`);
     return { ...base, result: "dry-run", mode, from, toplevel: built.toplevel };
+  }
+
+  let idleFallback = false;
+  if (mode === "switch" && deps.waitForIdle && (await deps.waitForIdle()) === "timeout") {
+    // never switch under the user's hands: apply on the next reboot instead
+    mode = "boot";
+    idleFallback = true;
+    deps.out("Not idle within the fallback period: setting the boot entry instead\n");
   }
 
   const applied = await deps.apply(built.toplevel, mode);
@@ -160,7 +178,7 @@ export async function switchCommit(
     return { ...base, result: "activation-failed", mode, from, to, toplevel: built.toplevel, detail: applied.error };
   }
   deps.out(`${mode === "boot" ? "Boot entry set" : "Switched"}: generation ${from ?? "none"} → ${to}\n`);
-  return { ...base, result: "switched", mode, from, to, toplevel: built.toplevel };
+  return { ...base, result: "switched", mode, from, to, toplevel: built.toplevel, ...(idleFallback ? { idleFallback } : {}) };
 }
 
 /** The switch service: one pending request, if any; the request is consumed either way. */

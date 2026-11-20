@@ -17,6 +17,17 @@ export interface RunRecord {
   updatedInputs?: string[];
   failures?: number;
   detail?: string;
+  /** main when the run branched. */
+  base?: string;
+}
+
+/**
+ * An earlier run's branch that main has moved past: it is kept for inspection but
+ * never resumed or switched (the new run starts over from the new main).
+ */
+export function superseded(previous: RunRecord | undefined, next: RunRecord): string | undefined {
+  if (!previous?.branch || !previous.base || !next.base) return undefined;
+  return previous.base !== next.base ? previous.branch : undefined;
 }
 
 /** Written by the agent after a green run; the switch service re-checks everything in it. */
@@ -24,6 +35,8 @@ export interface SwitchRequest {
   commit: string;
   branch: string;
   at: string;
+  /** main when the run branched. */
+  base?: string;
 }
 
 export const requestPath = (stateDir: string) => join(stateDir, "switch-request.json");
@@ -112,7 +125,7 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
   const release = await acquireLock(stateDir);
   if (!release) return { at, status: "locked", detail: "another run holds the lock" };
   try {
-    const { git, branch } = await prepareBranch(cfg, stateDir, now);
+    const { git, branch, base } = await prepareBranch(cfg, stateDir, now);
     const dir = git.dir;
     const inputs = inputsToUpdate(await readFile(join(dir, "flake.lock"), "utf8"), cfg.selfInput);
     deps.out(`Updating ${inputs.join(", ")} on ${branch}\n`);
@@ -122,7 +135,7 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
       await git.run("checkout", "--detach");
       await git.run("branch", "-D", branch);
       deps.out("Already up to date.\n");
-      return { at, status: "up-to-date", updatedInputs: [] };
+      return { at, status: "up-to-date", updatedInputs: [], base };
     }
 
     const target = { flake: dir, host: cfg.host, user: cfg.user };
@@ -134,7 +147,7 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
       await git.run("add", "flake.lock");
       await git.run("commit", "-m", `flake.lock: update ${inputs.join(", ")}\n\nBuild failed:\n${built.stderr.trim().split("\n").slice(-15).join("\n")}`);
       deps.out(`Build failed on ${branch}.\n`);
-      return { at, status: "build-failed", branch, commit: await git.run("rev-parse", "HEAD"), updatedInputs: inputs, detail: built.stderr.trim().split("\n").at(-1) };
+      return { at, status: "build-failed", base, branch, commit: await git.run("rev-parse", "HEAD"), updatedInputs: inputs, detail: built.stderr.trim().split("\n").at(-1) };
     }
     const toplevel = built.stdout.trim().split("\n").at(-1)!;
 
@@ -145,12 +158,13 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
     const commit = await git.run("rev-parse", "HEAD");
     deps.out(`${branch} ${commit.slice(0, 12)}: ${failures.length ? `${failures.length} probe failures` : "probes green"}\n`);
     if (!failures.length) {
-      const req: SwitchRequest = { commit, branch, at };
+      const req: SwitchRequest = { commit, branch, at, base };
       await writeFile(requestPath(stateDir), JSON.stringify(req) + "\n");
     }
     return {
       at,
       status: failures.length ? "probes-red" : "green",
+      base,
       branch,
       commit,
       toplevel,
