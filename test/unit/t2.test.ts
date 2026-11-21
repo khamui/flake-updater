@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Captured } from "../../src/nix/exec.js";
 import { bwrapArgs, sandboxEnv, type Sandbox } from "../../src/probes/sandbox.js";
-import { diffT2, normalise, type T2Snapshot } from "../../src/probes/t2.js";
+import { diffStarts, diffT2, normalise, runStarter, selectStarters, type T2Snapshot } from "../../src/probes/t2.js";
 import {
   BUILTIN_VALIDATORS,
   loadCustomValidators,
@@ -122,5 +122,65 @@ describe("diffT2", () => {
       ["fail", "validator-warning", "starship", "Unknown key 'foo'"],
       ["fail", "validator-error", "alacritty", "TOML parse error"],
     ]);
+  });
+});
+
+describe("starts cleanly", () => {
+  const sb = (exec: Sandbox["exec"]): Sandbox => ({ toplevel: "/nix/store/sys", user: "kha", home: "/tmp/flake-agent-x", exec, dispose: async () => {} });
+  const ok = (stderr = ""): Captured => ({ code: 0, stdout: "x 1.0\n", stderr });
+
+  it("checks enabled programs with an obvious binary that no validator covers", () => {
+    const enabled = new Map<string, string | null>([["helix", "hx"], ["tmux", "tmux"], ["dconf", null], ["bat", "bat"]]);
+    const { starters, unchecked } = selectStarters(enabled, selectValidators(new Set(enabled.keys()), BUILTIN_VALIDATORS));
+    expect(starters).toEqual([{ program: "bat", bin: "bat" }, { program: "helix", bin: "hx" }]);
+    expect(unchecked).toEqual({ dconf: "no obvious binary" });
+  });
+
+  it("runs only --version, and says when the binary isn't there", async () => {
+    const calls: string[] = [];
+    const r = await runStarter(sb(async (cmd, args) => (calls.push([cmd, ...args].join(" ")), ok())), { program: "helix", bin: "hx" });
+    expect(r).toEqual({ code: 0, stderr: [] });
+    expect(calls).toEqual(['sh -c command -v "$1" sh hx', "hx --version"]);
+    const missing = await runStarter(sb(async () => ({ code: 1, stdout: "", stderr: "" })), { program: "helix", bin: "hx" });
+    expect(missing).toEqual({ unchecked: "hx not installed", missing: true });
+  });
+
+  it("gives up on a hanging binary: unchecked, not failed", async () => {
+    const hang = sb(async (cmd) => (cmd === "sh" ? ok() : new Promise<Captured>(() => {})));
+    const started = Date.now();
+    // the race allows the timeout plus 2 s for a binary whose output stays open
+    expect(await runStarter(hang, { program: "x", bin: "x" }, 10)).toEqual({ unchecked: "x --version timed out after 0.01 s" });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(await runStarter(sb(async (cmd) => (cmd === "sh" ? ok() : { code: 124, stdout: "", stderr: "timed out" })), { program: "x", bin: "x" })).toMatchObject({ unchecked: expect.stringMatching(/timed out/) });
+  });
+
+  it("strips PIDs and timestamps from stderr", async () => {
+    const r = await runStarter(sb(async (cmd) => (cmd === "sh" ? ok() : ok("(process:326137): thunar-WARNING **: 15:16:17.683: no display\n"))), { program: "thunar", bin: "thunar" });
+    expect(r).toEqual({ code: 0, stderr: ["(process:N): thunar-WARNING **: N:N:N.N: no display"] });
+  });
+
+  it("fails a program that started cleanly before and now rejects the config", () => {
+    const before = { helix: { code: 0, stderr: [] } };
+    const after = { helix: { code: 1, stderr: ["Error: unknown field `editor.foo` in config.toml"] } };
+    expect(diffStarts(before, after)).toEqual([
+      { severity: "fail", kind: "start-failed", subject: "helix", detail: "--version exited with 1: Error: unknown field `editor.foo` in config.toml" },
+      { severity: "fail", kind: "start-stderr", subject: "helix", detail: "Error: unknown field `editor.foo` in config.toml" },
+    ]);
+  });
+
+  it("checks a newly enabled program against nothing, and leaves what was already broken or unchecked", () => {
+    const missing = { helix: { unchecked: "hx not installed", missing: true as const } };
+    expect(diffStarts(missing, { helix: { code: 2, stderr: [] } }).map((f) => f.kind)).toEqual(["start-failed"]);
+    expect(diffStarts({}, { helix: { code: 0, stderr: ["note"] } })).toEqual([]);
+    // rofi without a display: exits 1 on both sides
+    const rofi = { rofi: { code: 1, stderr: ["No valid backend"] } };
+    expect(diffStarts(rofi, rofi)).toEqual([]);
+    expect(diffStarts({ x: { unchecked: "x --version timed out after 5 s" } }, { x: { code: 1, stderr: [] } })).toEqual([]);
+    expect(diffStarts({ x: { code: 0, stderr: [] } }, { x: { unchecked: "no obvious binary" } })).toEqual([]);
+  });
+
+  it("is part of diffT2", () => {
+    const t2 = (starts: T2Snapshot["starts"]): T2Snapshot => ({ tier: "T2", results: {}, starts });
+    expect(diffT2(t2({ bat: { code: 0, stderr: [] } }), t2({ bat: { code: 1, stderr: [] } })).map((f) => f.kind)).toEqual(["start-failed"]);
   });
 });

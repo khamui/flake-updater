@@ -1,11 +1,11 @@
-import { discoverPrograms, type Target } from "../discovery/discover.js";
+import { discoverEnabled, type Target } from "../discovery/discover.js";
 import { run } from "../nix/exec.js";
 import { nixStore } from "../nix/store.js";
 import { DEEP_PROBES } from "./deep/index.js";
 import { writeSnapshot } from "./snapshots.js";
 import { diffT0, snapshotT0, type Finding } from "./t0.js";
 import { diffT1, snapshotT1, type T1Change, type T1Snapshot } from "./t1.js";
-import { diffT2, snapshotT2 } from "./t2.js";
+import { diffT2, selectStarters, snapshotT2, type T2Snapshot } from "./t2.js";
 import { diffT3, selectDeepProbes, snapshotT3 } from "./t3.js";
 import { BUILTIN_VALIDATORS, loadCustomValidators, selectValidators } from "./validators.js";
 
@@ -21,7 +21,18 @@ export interface ProbeRun {
   t2: Finding[];
   t3: Finding[];
   validators: string[];
+  /** Programs given the starts-cleanly check, and those left unchecked (with why). */
+  starts: string[];
+  unchecked: string[];
   deep: string[];
+}
+
+function startsOf(t2: T2Snapshot): { starts: string[]; unchecked: string[] } {
+  const all = Object.entries(t2.starts ?? {});
+  return {
+    starts: all.filter(([, s]) => !("unchecked" in s)).map(([p]) => p),
+    unchecked: all.flatMap(([p, s]) => ("unchecked" in s ? [`${p} (${s.unchecked})`] : [])),
+  };
 }
 
 /**
@@ -36,11 +47,13 @@ export async function probeAll(repo: string, target: Target, against: string, to
     snapshotT1(nixStore, toplevel, target.user),
   ]);
 
-  const programs = await discoverPrograms(target);
+  const enabled = await discoverEnabled(target);
+  const programs = new Set(enabled.keys());
   const validators = selectValidators(programs, [...BUILTIN_VALIDATORS, ...(await loadCustomValidators(repo))]);
+  const { starters, unchecked } = selectStarters(enabled, validators);
   // sequential: validators start servers (Xvfb, tmux) and must not race
-  const oldT2 = await snapshotT2(against, target.user, validators);
-  const newT2 = await snapshotT2(toplevel, target.user, validators);
+  const oldT2 = await snapshotT2(against, target.user, validators, starters, unchecked);
+  const newT2 = await snapshotT2(toplevel, target.user, validators, starters, unchecked);
   const deep = selectDeepProbes(programs, DEEP_PROBES);
   const oldT3 = await snapshotT3(against, target.user, deep);
   const newT3 = await snapshotT3(toplevel, target.user, deep);
@@ -62,6 +75,7 @@ export async function probeAll(repo: string, target: Target, against: string, to
     t2: diffT2(oldT2, newT2),
     t3: diffT3(oldT3, newT3, deep),
     validators: validators.map((v) => v.name),
+    ...startsOf(newT2),
     deep: deep.map((p) => p.name),
   };
 }
@@ -71,10 +85,12 @@ export async function probeAll(repo: string, target: Target, against: string, to
  * `<repo>/.flake-agent/snapshots/<host>/`, so later snapshots have a baseline.
  */
 export async function snapshotSystem(repo: string, target: Target, toplevel: string): Promise<string[]> {
-  const programs = await discoverPrograms(target);
+  const enabled = await discoverEnabled(target);
+  const programs = new Set(enabled.keys());
   const validators = selectValidators(programs, [...BUILTIN_VALIDATORS, ...(await loadCustomValidators(repo))]);
+  const { starters, unchecked } = selectStarters(enabled, validators);
   const [t0, t1] = await Promise.all([snapshotT0(nixStore, toplevel, target.user), snapshotT1(nixStore, toplevel, target.user)]);
-  const t2 = await snapshotT2(toplevel, target.user, validators);
+  const t2 = await snapshotT2(toplevel, target.user, validators, starters, unchecked);
   const t3 = await snapshotT3(toplevel, target.user, selectDeepProbes(programs, DEEP_PROBES));
   return [
     await writeSnapshot(repo, target.host, "t0", t0),
@@ -104,7 +120,10 @@ export function formatProbeRun(r: ProbeRun): string {
   text += formatFindings("T0", r.t0);
   text += "\n" + formatFindings("T1", r.t1.map((c) => ({ ...c, detail: "" })));
   for (const c of r.t1) if (c.detail) text += `\n--- ${c.subject}\n${c.detail}\n`;
-  text += `\nT2 validators: ${r.validators.join(", ") || "none"}\n` + formatFindings("T2", r.t2);
+  text += `\nT2 validators: ${r.validators.join(", ") || "none"}\n`;
+  text += `T2 starts cleanly: ${r.starts.join(", ") || "none"}\n`;
+  if (r.unchecked.length) text += `T2 unchecked: ${r.unchecked.join(", ")}\n`;
+  text += formatFindings("T2", r.t2);
   text += `\nT3 probes: ${r.deep.join(", ") || "none"}\n` + formatFindings("T3", r.t3);
   return text;
 }

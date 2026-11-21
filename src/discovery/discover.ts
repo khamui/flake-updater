@@ -62,23 +62,36 @@ export async function discoverPackages(target: Target): Promise<DeclaredPackage[
   return parseDiscovery(json);
 }
 
-/** Nix function applied to the host's `config`; names of enabled `programs.*` in NixOS and HM. */
+/**
+ * Nix function applied to the host's `config`: enabled `programs.*` in NixOS
+ * and HM, each with its package's `meta.mainProgram` (null without one).
+ */
 export function programsExpr(user: string): string {
   if (!USER_NAME.test(user)) throw new Error(`invalid user name: ${user}`);
   return `config: let
-    enabled = set: builtins.filter
-      (n: (builtins.tryEval ((set.\${n} or {}).enable or false)).value == true)
-      (builtins.attrNames set);
+    enabled = set: builtins.listToAttrs (builtins.concatMap (n: let
+      cfg = set.\${n} or {};
+      main = builtins.tryEval (let p = cfg.package or null; in
+        if builtins.isAttrs p && p ? meta && p.meta ? mainProgram && builtins.isString p.meta.mainProgram then p.meta.mainProgram else null);
+    in if (builtins.tryEval (cfg.enable or false)).value == true then [{ name = n; value = if main.success then main.value else null; }] else [])
+      (builtins.attrNames set));
     hm = config.home-manager.users or {};
   in {
     nixos = enabled config.programs;
-    home = if hm ? "${user}" then enabled hm."${user}".programs else [];
+    home = if hm ? "${user}" then enabled hm."${user}".programs else {};
   }`;
+}
+
+/** Programs enabled in the host config (NixOS or home-manager) → their obvious binary, if any. */
+export async function discoverEnabled(target: Target): Promise<Map<string, string | null>> {
+  const json = await run("nix", ["eval", "--json", configAttr(target, "config"), "--apply", programsExpr(target.user)]);
+  const { nixos, home } = JSON.parse(json) as { nixos: Record<string, string | null>; home: Record<string, string | null> };
+  const out = new Map<string, string | null>(Object.entries(nixos));
+  for (const [name, main] of Object.entries(home)) out.set(name, main ?? out.get(name) ?? null);
+  return out;
 }
 
 /** Programs enabled in the host config (NixOS or home-manager). */
 export async function discoverPrograms(target: Target): Promise<Set<string>> {
-  const json = await run("nix", ["eval", "--json", configAttr(target, "config"), "--apply", programsExpr(target.user)]);
-  const { nixos, home } = JSON.parse(json) as { nixos: string[]; home: string[] };
-  return new Set([...nixos, ...home]);
+  return new Set((await discoverEnabled(target)).keys());
 }
