@@ -1,5 +1,5 @@
 import { bindings } from "./nixscan.js";
-import type { FileChange } from "./structure.js";
+import { countsTowardsLimit, type FileChange } from "./structure.js";
 
 export interface Flag {
   class: "code" | "fetch";
@@ -36,12 +36,27 @@ export const FLAGS: Flag[] = [
   { class: "fetch", name: "builtins.fetch*", re: /\bbuiltins\.fetch\w*/ },
 ];
 
+/**
+ * Rendered init files only (shell rc, git config, nvim init): a new URL or raw
+ * socket there runs on the next shell or editor start. In Nix source, URLs are
+ * common (homepages, fetchers) and fetchers are flagged on their own.
+ */
+export const RENDERED_FLAGS: Flag[] = [
+  { class: "fetch", name: "URL", re: /\b(?:https?|ftp):\/\// },
+  { class: "code", name: "/dev/tcp", re: /\/dev\/(?:tcp|udp)\// },
+  { class: "code", name: "network library", re: /\b(?:urlopen|urllib|requests\.(?:get|post)|socket\.socket|IO::Socket|LWP::|Net::HTTP|Invoke-WebRequest)\b/ },
+];
+
 /** Embedded config blocks; growing one by more than this many lines needs review. */
 export const EMBEDDED_BLOCKS = ["extraConfig", "extraLuaConfig", "luaConfigRC", "initContent", "interactiveShellInit"];
 export const EMBEDDED_GROWTH = 3;
 
-/** Not scanned: the lock is full of hashes, `.flake-agent/` holds snapshots and keep-old patches. */
-const SKIP = (path: string) => path === "flake.lock" || path.startsWith(".flake-agent/");
+/**
+ * Not scanned: the lock (full of hashes) and records nothing evaluates
+ * (snapshots, CHANGES.md, keep-old patches and notes). Anything else under
+ * .flake-agent/ can be imported by the config, so it is.
+ */
+const SKIP = (path: string) => !countsTowardsLimit(path);
 
 const count = (text: string, re: RegExp) =>
   text.split("\n").filter((line) => re.test(line)).length;
@@ -73,17 +88,26 @@ function blockLines(src: string, block: string): number {
 }
 
 /**
+ * New flagged lines in rendered init files (see GUARD_NIX `scan`): the
+ * agent's side against the baseline, both on the new lock.
+ */
+export function renderedFlagViolations(baseline: Record<string, string | null>, agent: Record<string, string | null>): string[] {
+  const changes = Object.keys(agent).map((name) => ({ path: `rendered:${name}`, before: baseline[name] ?? null, after: agent[name] ?? null }));
+  return flagViolations(changes, [...FLAGS, ...RENDERED_FLAGS]);
+}
+
+/**
  * New occurrences of flagged patterns in the agent's diff. Counting per file
  * (not per diff line) means existing or moved occurrences never trigger.
  */
-export function flagViolations(changes: FileChange[]): string[] {
+export function flagViolations(changes: FileChange[], flags: Flag[] = FLAGS): string[] {
   const reasons: string[] = [];
   for (const { path, before, after } of changes) {
     if (SKIP(path) || after === null) continue;
     const old = before ?? "";
     const added = addedLines(old, after);
 
-    for (const flag of FLAGS) {
+    for (const flag of flags) {
       if (count(after, flag.re) <= count(old, flag.re)) continue;
       const lines = added.filter((l) => flag.re.test(l)).map(quote);
       reasons.push(`flag(${flag.class}): new ${flag.name} in ${path}${lines.length ? `: ${lines.join(" | ")}` : ""}`);

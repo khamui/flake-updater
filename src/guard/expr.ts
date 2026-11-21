@@ -42,7 +42,23 @@ export const GUARD_NIX = `user: sys0: let
 
   hm = (config.home-manager.users or {}).\${user} or null;
   homeFile = name: if hm != null && hm.home.file ? \${name} && (hm.home.file.\${name}.enable or true) then hm.home.file.\${name} else null;
+
+  # Shell, editor and tool init files, as rendered. Scanned for code-execution
+  # and fetch flags, not compared whole: what the source text hides (string
+  # concatenation, a file the text scan skips) shows here.
+  initFile = n: builtins.match "(.*/)?[.]?(zshrc|zshenv|zprofile|zlogin|zinputrc|bashrc|bash_profile|profile|inputrc|tmux[.]conf|gitconfig)|(.*/)?(git/config|fish/config[.]fish|nvim/init[.](lua|vim))" n != null;
+  scanFiles = prefix: files: get:
+    builtins.listToAttrs (map (n: { name = "\${prefix}\${n}"; value = rendered (get n); }) (builtins.filter initFile (builtins.attrNames files)));
+  readAny = v: let r = builtins.tryEval (if builtins.isString v then v else builtins.readFile v); in
+    if r.success then builtins.unsafeDiscardStringContext r.value else "<unreadable>";
+  nvfLua = cfg: let on = builtins.tryEval (cfg.programs.nvf.enable or false); in
+    if on.success && on.value then readAny cfg.programs.nvf.finalPackage.passthru.initLua else null;
 in {
+  scan =
+    scanFiles "/etc/" etc etcFile
+    // (if hm == null then {} else scanFiles "~/" hm.home.file homeFile)
+    // { "nvf:init.lua" = nvfLua config; "~/nvf:init.lua" = if hm == null then null else nvfLua hm; };
+
   "users.users" = builtins.mapAttrs (_: u: safe 5 (removeAttrs u ["packages"])) config.users.users;
   "users.groups" = safe 4 config.users.groups;
   "security" = safe 5 config.security;
