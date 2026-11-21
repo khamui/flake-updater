@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RunState } from "../../src/preflight/state.js";
 import { StateStore } from "../../src/preflight/state.js";
@@ -11,6 +11,7 @@ import type { SwitchRecord } from "../../src/switch/switch.js";
 import { changeLines, changesEntry, latestEvent, prependEntry } from "../../src/report/report.js";
 import { showChange, withoutTrailers } from "../../src/report/show.js";
 import { countsTowardsLimit } from "../../src/guard/structure.js";
+import { upstreamFindings, upstreamNotes, upstreamNotesPath } from "../../src/report/upstream.js";
 
 const SHA = "a".repeat(40);
 const run: RunRecord = {
@@ -48,10 +49,16 @@ describe("report", () => {
     expect(e.text).toContain("inputs: nixpkgs, nvf, 3 config changes, kept back: tools");
     expect(e.text).toMatch(/⚠ nvf-tailwind-2026-11 +nvf: tailwind language → lsp preset/);
     expect(e.text).toMatch(/⛔ tsls-hash-2026-11 +needs review: tsls: outputHash override/);
-    expect(e.text).toContain("⚠ upstream: binary-removed system/logoutd: shadow-4.19.4");
+    expect(e.text).toContain("⚠ upstream: binary-removed system/logoutd: shadow-4.19.4  (upstream-binary-removed-system-logoutd-2026-11)");
     expect(e.text).toContain("Details:  flake-agent show nvf-tailwind-2026-11");
     expect(e.text).toContain("Undo:     flake-agent revert nvf-tailwind-2026-11");
     expect(e.text).toContain("Repo:     main fast-forwarded");
+  });
+
+  it("points at the first upstream-only finding when the agent changed nothing", () => {
+    const e = latestEvent({ lastRun: { ...run, changes: [], pinned: [] } }, switched)!;
+    expect(e.text).toContain("Details:  flake-agent show upstream-binary-removed-system-logoutd-2026-11");
+    expect(e.text).not.toContain("Undo:");
   });
 
   it("has nothing to say about a green run that hasn't switched yet", () => {
@@ -91,6 +98,7 @@ describe("CHANGES.md", () => {
     const first = prependEntry(undefined, changesEntry(run));
     expect(first).toMatch(/^# Changes\n\nWritten by flake-agent, newest first.\n\n## 2026-11-25 — agent\/update-2026-11-25 \(green\)/);
     expect(first).toContain("- ✓ `nvf-ts-rename-2026-11` nvf: languages.ts → languages.typescript");
+    expect(first).toContain("- ⚠ upstream `upstream-binary-removed-system-logoutd-2026-11` binary-removed system/logoutd: shadow-4.19.4");
 
     const second = prependEntry(first, changesEntry({ ...run, at: "2026-12-02T03:00:00.000Z", branch: "agent/update-2026-12-02" }));
     expect(second.indexOf("2026-12-02")).toBeLessThan(second.indexOf("## 2026-11-25"));
@@ -117,6 +125,7 @@ describe("status", () => {
     expect(text).toContain("⛔ tsls-hash-2026-11  needs review");
     expect(text).toContain("Last switch: needs-review");
     expect(text).toContain("⛔ guard: hash: outputHash changed");
+    expect(text).toContain("⚠ upstream upstream-binary-removed-system-logoutd-2026-11  binary-removed system/logoutd: shadow-4.19.4");
   });
 });
 
@@ -174,6 +183,28 @@ describe("show", () => {
     expect(text).not.toContain("t3.json");
 
     expect(await showChange(repo, "nope-2026-11", "laptop")).toBeUndefined();
+  });
+
+  it("resolves an upstream-only id from the notes the run recorded", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "show-upstream-"));
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=a", "-c", "user.email=a@x", "-C", repo, ...args], { encoding: "utf8" });
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    await writeFile(join(repo, "c.nix"), "{ }\n");
+    git("add", ".");
+    git("commit", "-qm", "init");
+    git("checkout", "-qb", "agent/update-2026-11-25");
+    const [f] = upstreamFindings(run.behaviourChanges!, run.at);
+    await mkdir(join(repo, dirname(upstreamNotesPath(f!.id))), { recursive: true });
+    await writeFile(join(repo, upstreamNotesPath(f!.id)), upstreamNotes(f!, run));
+    git("add", ".");
+    git("commit", "-qm", "CHANGES.md: agent/update-2026-11-25 (green)");
+    git("checkout", "-q", "main");
+
+    const text = (await showChange(repo, f!.id, "laptop"))!;
+    expect(text).toContain(`${f!.id} (upstream-only)`);
+    expect(text).toContain("Finding: binary-removed system/logoutd: shadow-4.19.4");
+    expect(text).toContain("none yet");
+    expect(await showChange(repo, "upstream-nope-2026-11", "laptop")).toBeUndefined();
   });
 
   it("drops trailer paragraphs only", () => {

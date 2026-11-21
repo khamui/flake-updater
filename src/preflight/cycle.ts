@@ -1,4 +1,4 @@
-import { CHOICE, changeLines } from "../report/report.js";
+import { CHOICE, changeLines, runUpstream } from "../report/report.js";
 import type { SwitchRecord } from "../switch/switch.js";
 import type { StateStore } from "./state.js";
 import type { PreflightFailure } from "./subscription.js";
@@ -67,7 +67,7 @@ export async function status(state: StateStore, out: (text: string) => void, ext
   if (r) {
     out(`Last run: ${r.status} (${r.at})${r.branch ? ` ${r.branch}` : ""}${r.commit ? ` ${r.commit.slice(0, 12)}` : ""}${r.detail ? ` — ${r.detail}` : ""}\n`);
     for (const l of changeLines(r)) out(`  ${l.mark} ${l.id}  ${l.text}\n`);
-    for (const l of r.behaviourChanges ?? []) out(`  ⚠ upstream: ${l.replace(/^- /, "")}\n`);
+    for (const f of runUpstream(r)) out(`  ⚠ upstream ${f.id}  ${f.finding}\n`);
   }
   const sw = extras.lastSwitch;
   if (sw) {
