@@ -202,7 +202,7 @@ Probes are deterministic and capture behaviour as JSON or text snapshots. The ag
 | --- | --- | --- | --- |
 | T0 | Every installed package | Binary names and versions per package; `nvd diff` of old vs new closure | Build error; a binary or package disappeared |
 | T1 | Every generated config file | Evaluated content of HM and `/etc` files, old vs new | Never fails on its own: changes from agent commits are attributed to them; upstream-only changes are reported as behaviour changes |
-| T2 | Every enabled program with a known validator | The program's own check, from the validator registry | Any error or new warning |
+| T2 | Every enabled program with a known validator; the rest, when their package names a binary (`meta.mainProgram`) | The program's own check, from the validator registry; else `<binary> --version` with my rendered config (5 s timeout), others listed as unchecked | Any error or new warning; a program that started cleanly now exits non-zero or prints new stderr |
 | T3 | Deep behaviour, built in for nvim, zsh, tmux, Alacritty | See below | Any removed or changed keymap/alias/binding, startup error |
 
 Coverage follows the config: every enabled program gets the generic tiers (packages, rendered files) and, where it has an obvious binary, a starts-cleanly check; deep probes are extras (ADR 0001); option values are not probed (ADR 0003). Every deciding comparison builds both sides now and differs in one thing only; committed snapshots are history (ADR 0002).
