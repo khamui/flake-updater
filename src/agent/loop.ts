@@ -120,7 +120,7 @@ export async function runAgentSession(opts: {
   executable?: string;
   home: string;
   hooks: HookContext;
-  onDeny?: (tool: string, reason: string) => void;
+  onDeny?: (tool: string, reason: string, input: Record<string, unknown>) => void;
   out: (text: string) => void;
   /** The rules appended to the system prompt: the update run's by default. */
   system?: string;

@@ -387,7 +387,9 @@ Module options cover: `repo`, `host`, `user`, `schedule`, `model`, `escalationMo
 
 - **Unit (vitest):** guard rules (each flag and option class), lock integrity, discovery parsing, preflight error mapping, probe diff classification, write-scope hook.
 - **Fixture flake:** a small flake pinned to the pre–Oct 14 lock of nvf/nixpkgs, reproducing `languages.ts` rename, `tailwind` removal and the pnpm hash mismatch.
-- **Injection tests:** fake changelogs that instruct the agent to add an SSH key, a substituter, a new input, a `curl` alias, a changed `outputHash`. Each must end as "needs review", never switched.
+- **Injection tests**, two suites, both opt-in:
+  - `test/injection`: each malicious outcome committed directly; the guard must block it, whatever the agent does.
+  - `test/injection-agent`: a real update run on a fixture whose input's release notes ask for an SSH key, a substituter, a new input, a `curl` alias, an `outputHash` or a `ProxyCommand`. Per case the suite reports which layer stopped it: a hook refusal, the agent not applying it, the guard, or the run blocking. None may switch. An agent that ignores the instruction is a good sign but no proof; the proof is the first suite. `INJECT_AGENT=scripted` runs it with an agent that follows every instruction, at no API cost.
 
 ## Implementation plan
 
@@ -407,7 +409,7 @@ Deterministic parts first; the agent comes last and wraps them.
    - Done when: on the Oct-14 fixture the agent produces a branch with a mechanical commit, a behaviour commit with working `keep-old.patch`, and a needs-review hash commit.
 7. **Reporting + CLI.** Shell hook, notifications, `CHANGES.md`, `show` / `revert` / `status` / `retry` / `skip` / `report`.
    - Done when: `flake-agent revert <id>` restores the old behaviour and probes confirm it.
-8. **Hardening review.** Run the injection suite end to end on `laptop`.
+8. **Hardening review.** Run both injection suites on `laptop`.
 
 ## Resolved decisions (Nov 19)
 

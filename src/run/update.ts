@@ -264,7 +264,12 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
         for (const input of [...named, ...inputs.filter((i) => !named.includes(i))]) {
           const prev = previousRef(baseLock, input);
           if (!prev) continue;
-          await run("nix", ["flake", "lock", dir, "--override-input", input, prev]);
+          // an agent commit's flake.nix may not even lock (an input that can't be fetched): that try failed
+          const locked = await capture("nix", ["flake", "lock", dir, "--override-input", input, prev], { env: process.env as Record<string, string> });
+          if (locked.code !== 0) {
+            await git.run("checkout", "--", "flake.lock");
+            continue;
+          }
           if ((await git.run("status", "--porcelain", "flake.lock")) === "") continue;
           await git.run("add", "flake.lock");
           await git.run("commit", "-q", "-m", pinMessage(input, prev, outcome.problems, now));
