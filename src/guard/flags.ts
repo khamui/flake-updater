@@ -45,6 +45,17 @@ export const RENDERED_FLAGS: Flag[] = [
   { class: "fetch", name: "URL", re: /\b(?:https?|ftp):\/\// },
   { class: "code", name: "/dev/tcp", re: /\/dev\/(?:tcp|udp)\// },
   { class: "code", name: "network library", re: /\b(?:urlopen|urllib|requests\.(?:get|post)|socket\.socket|IO::Socket|LWP::|Net::HTTP|Invoke-WebRequest)\b/ },
+  // executing a computed string: what still shows once the URL and the command are split
+  { class: "code", name: "vim.fn[…]", re: /\bvim\.fn\s*\[/ },
+  { class: "code", name: "vim.call", re: /\bvim\.(?:call|api\.nvim_call_function)\b/ },
+  { class: "code", name: "Lua dynamic lookup", re: /(?<![\w.])(?:os|io|_G|_ENV)\s*\[/ },
+  { class: "code", name: "Lua load", re: /(?<![\w.:])(?:loadstring|load|dofile|loadfile)\s*\(/ },
+  { class: "code", name: "pipe to shell", re: /\|\s*(?:ba|z|da|k|fi)?sh\b/ },
+  { class: "code", name: "xxd -r", re: /\bxxd\s+-r/ },
+  // printable characters written as \x63 or \143; not \033 or \x1b (colours)
+  { class: "code", name: "escaped characters", re: /\\x[2-7][0-9a-fA-F]|\\(?:0?[4-7][0-7]|1[0-7][0-7])(?![0-9])/ },
+  // ba''se64, c""url: a word split by empty quotes
+  { class: "code", name: "split word", re: /\w(?:''|"")\w/ },
 ];
 
 /** Embedded config blocks; growing one by more than this many lines needs review. */
