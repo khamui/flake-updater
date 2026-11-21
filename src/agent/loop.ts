@@ -122,6 +122,8 @@ export async function runAgentSession(opts: {
   hooks: HookContext;
   onDeny?: (tool: string, reason: string) => void;
   out: (text: string) => void;
+  /** The rules appended to the system prompt: the update run's by default. */
+  system?: string;
 }): Promise<{ quota?: PreflightFailure; summary: string }> {
   const month = new Date().toISOString().slice(0, 7);
   const options: Options = {
@@ -134,7 +136,7 @@ export async function runAgentSession(opts: {
     permissionMode: "dontAsk",
     settingSources: [],
     persistSession: false,
-    systemPrompt: { type: "preset", preset: "claude_code", append: rules(opts.cfg, opts.repo, month) },
+    systemPrompt: { type: "preset", preset: "claude_code", append: opts.system ?? rules(opts.cfg, opts.repo, month) },
     hooks: { PreToolUse: preToolUseHooks(opts.hooks, opts.onDeny) },
     env: {
       PATH: process.env.PATH ?? "",

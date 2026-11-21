@@ -66,6 +66,16 @@ describe("report", () => {
     expect(latestEvent({ lastRun: run }, undefined)).toBeUndefined();
   });
 
+  it("says when an upstream revert was blocked, and that nothing was switched", () => {
+    const id = "upstream-zsh-alias-removed-ll-2026-11";
+    const lastRevert = { at: "2026-11-26T10:00:00.000Z", requestAt: "x", id, status: "blocked" as const, branch: `agent/revert-${id}`, detail: "not restored after 3 attempts: …" };
+    const e = latestEvent({ lastRun: run, lastRevert }, switched)!;
+    expect(e.key).toBe("revert:2026-11-26T10:00:00.000Z");
+    expect(e.text).toBe(`Revert of ${id} blocked (2026-11-26): nothing was switched\n  not restored after 3 attempts: …\n  Branch:   agent/revert-${id}\n`);
+    // a revert that asked for the switch is reported by the switch
+    expect(latestEvent({ lastRun: run, lastRevert: { ...lastRevert, status: "switch-requested" } }, undefined)).toBeUndefined();
+  });
+
   it("reports a rollback as a new event", () => {
     const rolled = { ...switched, rolledBack: { at: "2026-11-25T04:05:00.000Z", reason: "nvim-startup-error neovim" } };
     const e = latestEvent({ lastRun: run }, rolled)!;
@@ -241,7 +251,7 @@ describe("show", () => {
     const text = (await showChange(repo, f!.id, "laptop"))!;
     expect(text).toContain(`${f!.id} (upstream-only)`);
     expect(text).toContain("Finding: binary-removed system/logoutd: shadow-4.19.4");
-    expect(text).toContain("none yet");
+    expect(text).toContain(`flake-agent revert ${f!.id} asks the agent`);
     expect(await showChange(repo, "upstream-nope-2026-11", "laptop")).toBeUndefined();
   });
 

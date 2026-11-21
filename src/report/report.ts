@@ -82,7 +82,7 @@ function switchReport(run: RunRecord | undefined, rec: SwitchRecord, handoffNote
   })();
   const lines = [head];
   if (run) lines.push(summaryLine(run), "", ...body(run));
-  if (rec.source === "user") lines.push(`  ↩ reverted ${rec.branch.replace(/^agent\/revert-/, "")} (flake-agent revert)`);
+  if (rec.branch.startsWith("agent/revert-")) lines.push(`  ↩ reverted ${rec.branch.replace(/^agent\/revert-/, "")} (flake-agent revert)`);
   if (rec.result === "needs-review" || rec.rolledBack) lines.push("", `  Branch:   ${rec.branch}`);
   if (handoffNote && rec.result === "switched" && !rec.rolledBack) lines.push("", `  Repo:     ${handoffNote}`);
   return lines.join("\n") + "\n";
@@ -121,6 +121,13 @@ export function latestEvent(state: RunState, rec: SwitchRecord | undefined, hand
   const run = state.lastRun;
   if (run && ["blocked", "build-failed", "probes-red"].includes(run.status)) {
     events.push({ at: run.at, key: `run:${run.at}`, text: runReport(run) });
+  }
+  const revert = state.lastRevert;
+  if (revert && revert.status !== "switch-requested") {
+    const lines = [`Revert of ${revert.id} ${revert.status} (${day(revert.at)}): nothing was switched`];
+    if (revert.detail) lines.push(`  ${revert.detail.split("\n")[0]}`);
+    if (revert.branch) lines.push(`  Branch:   ${revert.branch}`);
+    events.push({ at: revert.at, key: `revert:${revert.at}`, text: lines.join("\n") + "\n" });
   }
   if (rec && rec.result !== "dry-run") {
     const forRun = run?.commit === rec.commit ? run : undefined;

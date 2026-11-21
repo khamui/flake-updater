@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunRecord } from "../run/update.js";
+import type { RevertRunRecord } from "../revert/upstream.js";
 import type { PreflightFailure } from "./subscription.js";
 
 export interface PreflightRecord {
@@ -16,6 +17,10 @@ export interface RunState {
   lastRun?: RunRecord;
   /** Branches main moved past; kept, never resumed. */
   superseded?: { branch: string; at: string }[];
+  /** The last run for a user's revert request (`flake-agent revert <upstream-id>`). */
+  lastRevert?: RevertRunRecord;
+  /** Revert requests already handled, by their `at`: the request file stays (the agent can't delete it). */
+  handledReverts?: string[];
 }
 
 export class StateStore {
