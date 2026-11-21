@@ -4,7 +4,8 @@ import { configAttr } from "../discovery/discover.js";
 import { capture, run } from "../nix/exec.js";
 import { acquireLock } from "../preflight/environment.js";
 import { probeAll, probeFailures, snapshotSystem, type ProbeRun } from "../probes/all.js";
-import { changesEntry, prependEntry } from "../report/report.js";
+import { changesEntry, prependEntry, runUpstream } from "../report/report.js";
+import { upstreamNotes, upstreamNotesPath } from "../report/upstream.js";
 import type { AgentConfig } from "./config.js";
 import type { FixOutcome, Verification } from "../agent/loop.js";
 import { parseLog, trailerProblems, type ChangeCommit } from "../agent/trailers.js";
@@ -316,6 +317,13 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
     await mkdir(dirname(changesFile), { recursive: true });
     await writeFile(changesFile, prependEntry(await readFile(changesFile, "utf8").catch(() => undefined), changesEntry(record)));
     await git.run("add", ".flake-agent/CHANGES.md");
+    // upstream-only findings have no commit of their own: `show <id>` reads these
+    for (const f of runUpstream(record)) {
+      const notes = join(dir, upstreamNotesPath(f.id));
+      await mkdir(dirname(notes), { recursive: true });
+      await writeFile(notes, upstreamNotes(f, record));
+      await git.run("add", upstreamNotesPath(f.id));
+    }
     await git.run("commit", "-q", "-m", `CHANGES.md: ${branch} (${status})`);
 
     const commit = await git.run("rev-parse", "HEAD");

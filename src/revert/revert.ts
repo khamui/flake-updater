@@ -82,6 +82,9 @@ export async function prepareRevert(o: RevertOptions, deps: RevertDeps): Promise
   const base = await git(o.repo, "rev-parse", `refs/heads/${o.mainBranch}`);
   const commits = await changeCommits(o.repo, o.id, base);
   if (commits.length === 0) {
+    if (o.id.startsWith("upstream-")) {
+      throw new Error(`${o.id} is upstream-only: no commit of this config caused it, so there is nothing to revert yet (agent-prepared reverts: #37)`);
+    }
     const elsewhere = await git(o.repo, "log", "--all", "-1", "--format=%H", "-F", `--grep=Change-Id: ${o.id}`);
     throw new Error(
       elsewhere

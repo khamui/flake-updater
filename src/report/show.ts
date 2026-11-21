@@ -3,6 +3,7 @@ import { DEEP_PROBES } from "../probes/deep/index.js";
 import type { Finding } from "../probes/t0.js";
 import { diffT3, type T3Snapshot } from "../probes/t3.js";
 import { parseLog, type ChangeCommit } from "../agent/trailers.js";
+import { upstreamNotesPath } from "./upstream.js";
 
 /** Deep-probe findings a user notices at the keyboard: keymaps, aliases, bindings, language servers. */
 const INTERACTIVE = /keymap|alias|binding|prefix|lsp/;
@@ -57,11 +58,27 @@ export async function changeCommits(repo: string, id: string, tip: string): Prom
   );
 }
 
+/** An upstream-only finding: no commit carries its id, the run recorded it in notes. */
+async function showUpstream(repo: string, id: string): Promise<string | undefined> {
+  const path = upstreamNotesPath(id);
+  const sha = (await git(repo, "log", "--all", "-1", "--format=%H", "--", path)).trim();
+  const notes = sha ? await fileAt(repo, sha, path) : undefined;
+  if (!notes) return undefined;
+  return [
+    `${id} (upstream-only)`,
+    "",
+    notes.trim(),
+    "",
+    "Alternative:",
+    "  none yet: an agent-prepared revert of upstream-only changes is not built (#37)",
+  ].join("\n") + "\n";
+}
+
 /** `flake-agent show <id>`: upstream reason, diff, affected behaviour, available alternative. */
 export async function showChange(repo: string, id: string, host: string): Promise<string | undefined> {
   // the newest branch carrying this id
   const shas = (await git(repo, "log", "--all", "--format=%H", "-F", `--grep=Change-Id: ${id}`)).split("\n").filter(Boolean);
-  if (shas.length === 0) return undefined;
+  if (shas.length === 0) return showUpstream(repo, id);
   const tip = (await git(repo, "branch", "--all", "--format=%(refname)", "--sort=-committerdate", "--contains", shas[0]!)).split("\n")[0] || shas[0]!;
   const commits = await changeCommits(repo, id, tip);
   if (commits.length === 0) return undefined;

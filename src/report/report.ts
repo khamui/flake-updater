@@ -1,6 +1,7 @@
 import type { RunState } from "../preflight/state.js";
 import type { RunRecord } from "../run/update.js";
 import type { SwitchRecord } from "../switch/switch.js";
+import { upstreamFindings } from "./upstream.js";
 
 /** The retry/skip choice after a failed preflight or an interrupted run. */
 export const CHOICE = "Retry now: `flake-agent retry`   Next cycle (default): `flake-agent skip`";
@@ -27,11 +28,14 @@ export function changeLines(run: RunRecord): ChangeLine[] {
   return lines;
 }
 
+/** A run's upstream-only findings with their ids. */
+export const runUpstream = (run: RunRecord) => upstreamFindings(run.behaviourChanges ?? [], run.at);
+
 /** Upstream-only findings, capped: they are often a long list of removed binaries. */
 function upstreamLines(run: RunRecord, max = 5): string[] {
-  const all = (run.behaviourChanges ?? []).map((l) => l.replace(/^- /, ""));
+  const all = runUpstream(run);
   if (all.length === 0) return [];
-  const shown = all.slice(0, max).map((l) => `  ⚠ upstream: ${l}`);
+  const shown = all.slice(0, max).map((f) => `  ⚠ upstream: ${f.finding}  (${f.id})`);
   if (all.length > max) shown.push(`  … ${all.length - max} more upstream changes: flake-agent status`);
   return shown;
 }
@@ -42,8 +46,11 @@ function body(run: RunRecord): string[] {
   const out = lines.map((l) => `  ${l.mark} ${l.id.padEnd(width)}  ${l.text}`);
   out.push(...upstreamLines(run));
   const behaviour = lines.find((l) => l.mark === "⚠");
+  const upstream = runUpstream(run)[0];
   if (behaviour) {
     out.push("", `  Details:  flake-agent show ${behaviour.id}`, `  Undo:     flake-agent revert ${behaviour.id}`);
+  } else if (upstream) {
+    out.push("", `  Details:  flake-agent show ${upstream.id}`);
   }
   return out;
 }
@@ -128,7 +135,7 @@ export function changesEntry(run: RunRecord): string {
   const lines = [`## ${day(run.at)} — ${run.branch ?? "run"} (${run.status})`, "", summaryLine(run) + "."];
   const items = [
     ...changeLines(run).map((l) => `- ${l.mark} \`${l.id}\` ${l.text}`),
-    ...(run.behaviourChanges ?? []).map((l) => `- ⚠ upstream: ${l.replace(/^- /, "")}`),
+    ...runUpstream(run).map((f) => `- ⚠ upstream \`${f.id}\` ${f.finding}`),
   ];
   if (items.length) lines.push("", ...items);
   if (run.detail) lines.push("", `> ${run.detail.split("\n")[0]!.trim()}`);
