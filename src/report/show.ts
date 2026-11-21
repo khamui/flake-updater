@@ -71,7 +71,7 @@ async function showUpstream(repo: string, id: string): Promise<string | undefine
     notes.trim(),
     "",
     "Alternative:",
-    "  none yet: an agent-prepared revert of upstream-only changes is not built (#37)",
+    `  flake-agent revert ${id} asks the agent to write the old behaviour explicitly (a removed package: keep an input back)`,
   ].join("\n") + "\n";
 }
 

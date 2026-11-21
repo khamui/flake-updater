@@ -37,9 +37,9 @@ function startsOf(t2: T2Snapshot): { starts: string[]; unchecked: string[] } {
 
 /**
  * All tiers, old (`against`) vs new (`toplevel`); the new snapshots are written
- * to `<repo>/.flake-agent/snapshots/<host>/`.
+ * to `<snapshots>/.flake-agent/snapshots/<host>/` (the repo, unless given).
  */
-export async function probeAll(repo: string, target: Target, against: string, toplevel: string): Promise<ProbeRun> {
+export async function probeAll(repo: string, target: Target, against: string, toplevel: string, snapshots = repo): Promise<ProbeRun> {
   const [oldT0, newT0, oldT1, newT1] = await Promise.all([
     snapshotT0(nixStore, against, target.user),
     snapshotT0(nixStore, toplevel, target.user),
@@ -59,10 +59,10 @@ export async function probeAll(repo: string, target: Target, against: string, to
   const newT3 = await snapshotT3(toplevel, target.user, deep);
 
   const files = [
-    await writeSnapshot(repo, target.host, "t0", newT0),
-    await writeSnapshot(repo, target.host, "t1", newT1),
-    await writeSnapshot(repo, target.host, "t2", newT2),
-    await writeSnapshot(repo, target.host, "t3", newT3),
+    await writeSnapshot(snapshots, target.host, "t0", newT0),
+    await writeSnapshot(snapshots, target.host, "t1", newT1),
+    await writeSnapshot(snapshots, target.host, "t2", newT2),
+    await writeSnapshot(snapshots, target.host, "t3", newT3),
   ];
   return {
     against,

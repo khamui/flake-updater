@@ -179,7 +179,7 @@ describe("revert", () => {
     git("checkout", "-q", "main");
     await expect(prepareRevert({ ...opts(repo), id: "later-2026-12" }, deps())).rejects.toThrow(/not on main: merge agent\/applied/);
     await expect(prepareRevert({ ...opts(repo), id: "nope-2026-11" }, deps())).rejects.toThrow(/no change nope-2026-11/);
-    await expect(prepareRevert({ ...opts(repo), id: "upstream-package-removed-light-2026-11" }, deps())).rejects.toThrow(/is upstream-only: .*#37/);
+    await expect(prepareRevert({ ...opts(repo), id: "upstream-package-removed-light-2026-11" }, deps())).rejects.toThrow(/is upstream-only: .*agent service prepares its revert/);
   });
 
   it("picks a new branch name when one revert of the change exists", async () => {

@@ -104,8 +104,8 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
-/** Clone or fetch the user's repo, then branch `agent/update-<date>` (suffixed if taken) off main. */
-export async function prepareBranch(cfg: AgentConfig, stateDir: string, now: Date): Promise<{ git: Git; branch: string; base: string }> {
+/** Clone or fetch the user's repo, then branch `name` (default `agent/update-<date>`; suffixed if taken) off main. */
+export async function prepareBranch(cfg: AgentConfig, stateDir: string, now: Date, name = branchName(now)): Promise<{ git: Git; branch: string; base: string }> {
   const dir = cloneDir(stateDir);
   const git = new Git(dir, { name: "flake-agent", email: `flake-agent@${cfg.host}` });
   const upstream = join(cfg.repo, ".git");
@@ -115,8 +115,8 @@ export async function prepareBranch(cfg: AgentConfig, stateDir: string, now: Dat
   await git.run("fetch", "--prune", upstream, `+refs/heads/${cfg.mainBranch}:refs/remotes/upstream/${cfg.mainBranch}`);
   const base = await git.run("rev-parse", `refs/remotes/upstream/${cfg.mainBranch}`);
 
-  let branch = branchName(now);
-  for (let n = 2; await git.exists(`refs/heads/${branch}`); n++) branch = `${branchName(now)}-${n}`;
+  let branch = name;
+  for (let n = 2; await git.exists(`refs/heads/${branch}`); n++) branch = `${name}-${n}`;
   await git.run("checkout", "--force", "-B", branch, base);
   // commits the agent makes itself carry the same identity
   await git.run("config", "user.name", git.identity.name);

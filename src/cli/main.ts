@@ -18,6 +18,9 @@ import { captureKeepOld } from "../agent/keepold.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
 import { USER_REQUEST_DIR, decideMode, realDeps, switchService } from "../switch/switch.js";
 import { prepareRevert } from "../revert/revert.js";
+import { parseNotes, readRevertRequest, removedFeature, upstreamRevertRun, writeRevertRequest } from "../revert/upstream.js";
+import { upstreamNotesPath } from "../report/upstream.js";
+import { fileAt } from "../report/show.js";
 import type { BuildDeps } from "../revert/sides.js";
 import { PREFERENCES } from "../guard/structure.js";
 import type { T3Snapshot } from "../probes/t3.js";
@@ -71,7 +74,8 @@ Commands:
   report      Show the latest report again (--once: only if not shown yet; the shell hook)
   show <id>   A change: upstream reason, affected keymaps/aliases, alternative, diff
   revert <id> Apply the change's keep-old.patch (or git revert it), build, probe, commit
-              on agent/revert-<id> and hand it to the switch service
+              on agent/revert-<id> and hand it to the switch service; an upstream-<…> id
+              asks the agent service to write the old behaviour (or keep an input back)
   switch      (root) Guard, build and switch/boot the commit the agent requested
   activate <toplevel>  (root) Set the system profile to <toplevel> and switch or boot
   gc          (root) nix-collect-garbage that keeps the newest --keep-system generations
@@ -101,6 +105,8 @@ Options:
   --note <text>     revert: append <text> to PREFERENCES.md (else asked; --no-note: don't)
   --request-dir <d> revert: where the switch service looks (default: /run/flake-agent when installed)
   --user-request-dir <d>  switch: also serve users' revert requests from <d>
+  --revert-request-dir <d>  run: handle a user's upstream revert request from <d> (default: /run/flake-agent when installed)
+  -y, --yes         revert: confirm keeping an input back for a removed package
   --delete-older-than <n>d  gc: like nix-collect-garbage
   --keep-system <n> gc: system generations always kept (default: 5)
   -h, --help        Show this help
@@ -141,6 +147,8 @@ async function main(argv: string[]): Promise<number> {
       "no-note": { type: "boolean" },
       "request-dir": { type: "string" },
       "user-request-dir": { type: "string" },
+      "revert-request-dir": { type: "string" },
+      yes: { type: "boolean", short: "y" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -290,6 +298,41 @@ async function main(argv: string[]): Promise<number> {
       const cfg = await loadConfig(file, file ? { repo: values.repo ? repo : undefined, host: values.host, user: values.user } : { repo, host: target.host, user: target.user });
       const out = (text: string) => process.stdout.write(text);
       const t = { flake: cfg.repo, host: cfg.host, user: cfg.user };
+      if (id.startsWith("upstream-")) {
+        // no commit of this config caused it: the agent service prepares the way back
+        const notes = parseNotes(id, (await fileAt(cfg.repo, cfg.mainBranch, upstreamNotesPath(id))) ?? "");
+        if (!notes) {
+          process.stderr.write(`revert: no upstream-only change ${id} on ${cfg.mainBranch}\n`);
+          return 1;
+        }
+        let pin = false;
+        if (removedFeature(notes.kind)) {
+          out(`${notes.finding}\nNothing in the configuration brings this back: only keeping an input at its previous revision does (${notes.inputs.join(", ") || "the run's inputs"}). The agent tries each and keeps the first that restores it (Change-Class: blocked).\n`);
+          pin = Boolean(values.yes) || (process.stdin.isTTY && /^y(es)?$/i.test((await ask("Keep that input back? [y/N] ")).trim()));
+          if (!pin) {
+            out("Nothing requested.\n");
+            return 0;
+          }
+        }
+        const note = values["no-note"]
+          ? undefined
+          : values.note?.trim() ||
+            (process.stdin.isTTY && /^y(es)?$/i.test((await ask(`Add to ${PREFERENCES}, so future runs keep this?\n  - ${id} (${notes.finding}): keep the old behaviour.\n[y/N] `)).trim())
+              ? `${id} (${notes.finding}): keep the old behaviour; reverted ${new Date().toISOString().slice(0, 10)}.`
+              : undefined);
+        const dir = values["request-dir"] ?? (installed ? USER_REQUEST_DIR : undefined);
+        if (!dir) {
+          process.stderr.write("revert: an upstream-only change is reverted by the agent service; none here (--request-dir)\n");
+          return 1;
+        }
+        await writeRevertRequest(dir, { id, at: new Date().toISOString(), ...(pin ? { pin } : {}), ...(note ? { note } : {}) });
+        if (installed) {
+          const started = await capture("systemctl", ["start", "--no-block", "flake-agent.service"]);
+          if (started.code !== 0) out(`Could not start flake-agent.service (${started.stderr.trim()}); the next scheduled run picks it up.\n`);
+        }
+        out(`Asked the agent for agent/revert-${id}: it ${pin ? "keeps an input back" : "writes the old behaviour"}, builds and probes it, then hands it to the switch service. flake-agent report shows the outcome.\n`);
+        return 0;
+      }
       const result = await prepareRevert(
         {
           repo: cfg.repo,
@@ -399,6 +442,55 @@ async function main(argv: string[]): Promise<number> {
           tokenFile: values["token-file"],
           envToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,
         };
+        // the user's request only: never one in the agent's own state dir, which the agent could write
+        const revertDir = values["revert-request-dir"] ?? ((await isInstalled()) ? USER_REQUEST_DIR : undefined);
+        const request = revertDir ? await readRevertRequest(revertDir) : undefined;
+        if (request && !((await state.load()).handledReverts ?? []).includes(request.at)) {
+          const token = values["use-login"] || values["no-agent"] ? undefined : await readToken(credentials);
+          const t = { host: cfg.host, user: cfg.user };
+          const tree = (dir: string) => ({ ...t, flake: dir });
+          const record = await upstreamRevertRun(cfg, state.dir, request, t, {
+            out,
+            async build(dir) {
+              const r = await capture("nix", ["build", "--no-link", "--print-out-paths", configAttr(tree(dir), "config.system.build.toplevel")], {
+                env: process.env as Record<string, string>,
+                timeoutMs: 50 * 60_000,
+              });
+              return r.code === 0 ? { ok: true, toplevel: r.stdout.trim().split("\n").at(-1) } : { ok: false, error: r.stderr };
+            },
+            probe: (dir, against, toplevel, snapshots) => probeAll(dir, tree(dir), against, toplevel, snapshots),
+            snapshot: async (dir, toplevel) => void (await snapshotSystem(dir, tree(dir), toplevel)),
+            pin: async (dir, input, ref) => void (await run("nix", ["flake", "lock", dir, "--override-input", input, ref])),
+            ...(values["no-agent"] || (!token && !values["use-login"])
+              ? {}
+              : {
+                  runAgent: async (prompt: string, model: string, system: string) => {
+                    const repo = join(state.dir, "repo");
+                    return runAgentSession({
+                      cfg,
+                      repo,
+                      prompt,
+                      model,
+                      system,
+                      token,
+                      executable: process.env.FLAKE_AGENT_CLAUDE,
+                      home: process.env.HOME ?? state.dir,
+                      hooks: {
+                        repo,
+                        writeScope: cfg.writeScope,
+                        selfInput: cfg.selfInput,
+                        allowedHosts: [...DOC_HOSTS, ...cfg.extraSources],
+                        allowedGithubRepos: githubRepos(await readFile(join(repo, "flake.lock"), "utf8")),
+                      },
+                      onDeny: (tool, reason) => out(`  refused ${tool}: ${reason}\n`),
+                      out,
+                    });
+                  },
+                }),
+          });
+          await state.update((s) => ({ ...s, lastRevert: record, handledReverts: [...(s.handledReverts ?? []), request.at].slice(-20) }));
+          return record.status === "switch-requested" ? 0 : 1;
+        }
         const fix: UpdateDeps["fix"] = values["no-agent"]
           ? undefined
           : async (v, { repo, verify, head }) => {
