@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import type { RunRecord } from "../../src/run/update.js";
 import type { SwitchRecord } from "../../src/switch/switch.js";
 import { changeLines, changesEntry, latestEvent, prependEntry } from "../../src/report/report.js";
 import { showChange, withoutTrailers } from "../../src/report/show.js";
+import type { T3Snapshot } from "../../src/probes/t3.js";
 import { countsTowardsLimit } from "../../src/guard/structure.js";
 import { upstreamFindings, upstreamNotes, upstreamNotesPath } from "../../src/report/upstream.js";
 
@@ -186,6 +187,40 @@ describe("show", () => {
     expect(text).not.toContain("t3.json");
 
     expect(await showChange(repo, "nope-2026-11", "laptop")).toBeUndefined();
+    expect(text).toContain("(history: the run's snapshots, not built;");
+  });
+
+  it("builds the branch with and without the change, so later edits and stale snapshots don't show", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "show-built-"));
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=a", "-c", "user.email=a@x", "-C", repo, ...args], { encoding: "utf8" });
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    await writeFile(join(repo, "c.nix"), "{ languages.tailwind.enable = true; }\n");
+    git("add", ".");
+    git("commit", "-qm", "init");
+    git("checkout", "-qb", "agent/update-2026-11-25");
+    await writeFile(join(repo, "c.nix"), "{ lsp.presets.tailwind.enable = true; }\n");
+    git("commit", "-qam", "nvf: tailwind language → lsp preset\n\nChange-Id: nvf-tailwind-2026-11\nChange-Class: behaviour");
+    // the user's later alias, in its own file
+    await writeFile(join(repo, "z.nix"), "{ shellAliases.ll = \"ls -l\"; }\n");
+    git("add", ".");
+    git("commit", "-qm", "zsh: ll");
+
+    const config = async (dir: string) => (await Promise.all(["c.nix", "z.nix"].map((n) => readFile(join(dir, n), "utf8").catch(() => "")))).join("");
+    const deps = {
+      build: async (dir: string) => ({ ok: true, toplevel: `/nix/store/${(await config(dir)).length}-system` }),
+      snapshot: async (dir: string) => {
+        const text = await config(dir);
+        return JSON.parse(
+          t3(neovim({}, /languages\.tailwind/.test(text) ? { tailwindcss: { cmd: "tw", resolves: true } } : {}), zsh(/ll/.test(text) ? { ll: "ls -l" } : {})),
+        ) as T3Snapshot;
+      },
+    };
+    const text = (await showChange(repo, "nvf-tailwind-2026-11", "laptop", deps))!;
+    expect(text).toMatch(/Affected keymaps, aliases and language servers \([0-9a-f]{12} built with and without it\):\n {2}nvim-lsp-missing tailwindcss/);
+    expect(text).not.toContain("zsh-alias");
+
+    const broken = { ...deps, build: async () => ({ ok: false, error: "error: boom" }) };
+    expect(await showChange(repo, "nvf-tailwind-2026-11", "laptop", broken)).toContain("(history: the run's snapshots, does not build: error: boom;");
   });
 
   it("resolves an upstream-only id from the notes the run recorded", async () => {
