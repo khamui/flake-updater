@@ -29,7 +29,7 @@ export function changeLines(run: RunRecord): ChangeLine[] {
 }
 
 /** A run's upstream-only findings with their ids. */
-export const runUpstream = (run: RunRecord) => upstreamFindings(run.behaviourChanges ?? [], run.at);
+export const runUpstream = (run: RunRecord) => upstreamFindings([...(run.behaviourChanges ?? []), ...(run.upstreamFiles ?? [])], run.at);
 
 /** Upstream-only findings, capped: they are often a long list of removed binaries. */
 function upstreamLines(run: RunRecord, max = 5): string[] {

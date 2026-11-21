@@ -100,6 +100,9 @@ describe("CHANGES.md", () => {
     expect(first).toContain("- ✓ `nvf-ts-rename-2026-11` nvf: languages.ts → languages.typescript");
     expect(first).toContain("- ⚠ upstream `upstream-binary-removed-system-logoutd-2026-11` binary-removed system/logoutd: shadow-4.19.4");
 
+    const files = changesEntry({ ...run, upstreamFiles: ["- file-changed etc/foo.conf"] });
+    expect(files).toContain("- ⚠ upstream `upstream-file-changed-etc-foo.conf-2026-11` file-changed etc/foo.conf");
+
     const second = prependEntry(first, changesEntry({ ...run, at: "2026-12-02T03:00:00.000Z", branch: "agent/update-2026-12-02" }));
     expect(second.indexOf("2026-12-02")).toBeLessThan(second.indexOf("## 2026-11-25"));
     expect(second.match(/# Changes/g)).toHaveLength(1);

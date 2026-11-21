@@ -4,7 +4,7 @@ import { nixStore } from "../nix/store.js";
 import { DEEP_PROBES } from "./deep/index.js";
 import { writeSnapshot } from "./snapshots.js";
 import { diffT0, snapshotT0, type Finding } from "./t0.js";
-import { diffT1, snapshotT1, type T1Change } from "./t1.js";
+import { diffT1, snapshotT1, type T1Change, type T1Snapshot } from "./t1.js";
 import { diffT2, snapshotT2 } from "./t2.js";
 import { diffT3, selectDeepProbes, snapshotT3 } from "./t3.js";
 import { BUILTIN_VALIDATORS, loadCustomValidators, selectValidators } from "./validators.js";
@@ -16,6 +16,8 @@ export interface ProbeRun {
   files: string[];
   t0: Finding[];
   t1: T1Change[];
+  /** The T1 snapshots `t1` compares: the run attributes their changes. */
+  t1Snapshots: { old: T1Snapshot; new: T1Snapshot };
   t2: Finding[];
   t3: Finding[];
   validators: string[];
@@ -56,6 +58,7 @@ export async function probeAll(repo: string, target: Target, against: string, to
     t0: diffT0(oldT0, newT0),
     // without agent commits there is nothing to attribute T1 changes to
     t1: await diffT1(oldT1, newT1),
+    t1Snapshots: { old: oldT1, new: newT1 },
     t2: diffT2(oldT2, newT2),
     t3: diffT3(oldT3, newT3, deep),
     validators: validators.map((v) => v.name),

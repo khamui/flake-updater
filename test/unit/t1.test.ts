@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Store } from "../../src/nix/store.js";
-import { attributeT1, diffT1, snapshotT1, unifiedDiff, type T1Snapshot } from "../../src/probes/t1.js";
+import { attributeT1, diffT1, snapshotT1, contentChange, unifiedDiff, upstreamT1, type T1Snapshot } from "../../src/probes/t1.js";
 
 /** Store path; `v` keeps same-named paths of different systems apart. */
 const p = (name: string, v = "0") => `/nix/store/${v.padStart(32, "0")}-${name}`;
@@ -171,5 +171,50 @@ describe("attributeT1", () => {
     const changes = await attributeT1(old, steps.slice(0, 1), fakeDiff);
     expect(changes.every((c) => c.attribution.source === "upstream")).toBe(true);
     expect(changes).toHaveLength(3);
+  });
+});
+
+describe("upstream-only generated files", () => {
+  const snap = (files: Record<string, string>): T1Snapshot => ({
+    tier: "T1",
+    files: Object.fromEntries(Object.entries(files).map(([k, hash]) => [k, { hash, path: `/${k}@${hash}` }])),
+  });
+  const diff = (file: string, minus: string[], plus: string[]) =>
+    [`--- /nix/store/${"a".repeat(32)}-etc/${file}`, `+++ /nix/store/${"b".repeat(32)}-etc/${file}`, "@@ -1 +1 @@", ...minus.map((l) => `-${l}`), ...plus.map((l) => `+${l}`)].join("\n");
+  const BUMP = diff("foo.service", [`ExecStart=/nix/store/${"a".repeat(32)}-foo-1.2/bin/foo --flag`], [`ExecStart=/nix/store/${"b".repeat(32)}-foo-1.3/bin/foo --flag`]);
+  const REAL = diff("foo.conf", ["colour = auto"], ["colour = always"]);
+  const pam = (svc: string) => diff(`pam.d/${svc}`, [`password sufficient /nix/store/${"a".repeat(32)}-linux-pam/pam_unix.so nullok yescrypt`], [`password sufficient /nix/store/${"b".repeat(32)}-linux-pam/pam_unix.so nullok`]);
+
+  it("leaves out store paths, the NixOS version and binaries", () => {
+    expect(contentChange(BUMP)).toBe("");
+    expect(contentChange(diff("os-release", ['BUILD_ID="26.11.20260723.e2587ca"'], ['BUILD_ID="26.11.20261119.0bb8272"']))).toBe("");
+    expect(contentChange("Binary files /nix/store/x/bin/a and /nix/store/y/bin/a differ")).toBe("");
+    expect(contentChange(REAL)).toBe("-colour = auto\n+colour = always");
+    expect(contentChange("Only in /nix/store/x-etc: new.conf")).toBe("Only in /nix/store/…: new.conf");
+  });
+
+  it("keeps a removed Lua comment, which diff prints as ---", () => {
+    expect(contentChange("--- a/init.lua\n+++ b/init.lua\n@@ -1 +0,0 @@\n--- keep me")).toBe("--- keep me");
+  });
+
+  it("reports files the lock alone changed, not the agent's or version bumps", async () => {
+    const old = snap({ "etc/foo.conf": "f1", "etc/foo.service": "s1", "home:kha/.zshrc": "z1", "etc/gone": "g1", "etc/gone.mode": "m1" });
+    const lock = snap({ "etc/foo.conf": "f2", "etc/foo.service": "s2", "home:kha/.zshrc": "z2" });
+    // the agent then edits .zshrc
+    const final = snap({ "etc/foo.conf": "f2", "etc/foo.service": "s2", "home:kha/.zshrc": "z3" });
+    const differ = async (a: string) => (a.startsWith("/etc/foo.service") ? BUMP : REAL);
+    const found = await upstreamT1(old, lock, final, differ);
+    expect(found.map((c) => `${c.kind} ${c.subject}`)).toEqual(["file-changed etc/foo.conf", "file-removed etc/gone"]);
+    expect(found[0]!.detail).toBe(REAL);
+  });
+
+  it("reports files with the same change once", async () => {
+    const svcs = ["login", "passwd", "sudo"];
+    const old = snap(Object.fromEntries([...svcs.map((s) => [`etc/pam.d/${s}`, "1"]), ["etc/a.crt", "1"], ["etc/ssl/b.crt", "1"]]));
+    const next = snap(Object.fromEntries([...svcs.map((s) => [`etc/pam.d/${s}`, "2"]), ["etc/a.crt", "2"], ["etc/ssl/b.crt", "2"]]));
+    const differ = async (a: string) => (a.includes("pam.d") ? pam(a.split("/")[3]!.split("@")[0]!) : diff("x.crt", ["CERT1"], ["CERT2"]));
+    const found = await upstreamT1(old, next, next, differ);
+    expect(found.map((c) => c.subject)).toEqual(["etc/a.crt (+1 more)", "etc/pam.d/ (3 files)"]);
+    expect(found[1]!.detail).toMatch(/^# etc\/pam.d\/login\n# etc\/pam.d\/passwd\n# etc\/pam.d\/sudo\n---/);
   });
 });

@@ -34,5 +34,13 @@ describe("upstream-only ids", () => {
     expect(notes).toContain("# upstream-binary-removed-system-logoutd-2026-11");
     expect(notes).toContain("Finding: binary-removed system/logoutd: shadow-4.19.4");
     expect(notes).toContain("Run: agent/update-2026-11-25 (2026-11-25), inputs: nixpkgs");
+    expect(notes).not.toContain("```");
+  });
+
+  it("include a generated file's diff", () => {
+    const [f] = upstreamFindings(["- file-changed home:kha/.config/foo.conf"], AT);
+    expect(f!.id).toBe("upstream-file-changed-home-kha-.config-foo.conf-2026-11");
+    const notes = upstreamNotes(f!, { at: AT }, "-a = 1\n+a = 2\n");
+    expect(notes).toContain("```diff\n-a = 1\n+a = 2\n```");
   });
 });

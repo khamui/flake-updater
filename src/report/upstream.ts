@@ -37,8 +37,9 @@ export function upstreamFindings(lines: string[], at: string): UpstreamFinding[]
 /** Where a run records an upstream-only finding, for `show` (not scanned or counted by the guard). */
 export const upstreamNotesPath = (id: string) => `.flake-agent/changes/${id}/notes.md`;
 
-export function upstreamNotes(f: UpstreamFinding, run: { at: string; branch?: string; updatedInputs?: string[] }): string {
-  return [
+/** `diff`: a changed generated file's content diff. */
+export function upstreamNotes(f: UpstreamFinding, run: { at: string; branch?: string; updatedInputs?: string[] }, diff?: string): string {
+  const lines = [
     `# ${f.id}`,
     "",
     "Upstream-only: the new lock alone changed this; the config and the agent's edits don't explain it.",
@@ -46,5 +47,7 @@ export function upstreamNotes(f: UpstreamFinding, run: { at: string; branch?: st
     `Finding: ${f.finding}`,
     `Run: ${run.branch ?? "run"} (${run.at.slice(0, 10)}), inputs: ${(run.updatedInputs ?? []).join(", ") || "none"}`,
     "",
-  ].join("\n");
+  ];
+  if (diff?.trim()) lines.push("```diff", diff.trimEnd(), "```", "");
+  return lines.join("\n");
 }
