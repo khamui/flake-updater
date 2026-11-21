@@ -4,6 +4,7 @@ import type { Finding } from "../probes/t0.js";
 import { diffT3, type T3Snapshot } from "../probes/t3.js";
 import { parseLog, type ChangeCommit } from "../agent/trailers.js";
 import { upstreamNotesPath } from "./upstream.js";
+import { buildSide, revertCommits, type BuildDeps } from "../revert/sides.js";
 
 /** Deep-probe findings a user notices at the keyboard: keymaps, aliases, bindings, language servers. */
 const INTERACTIVE = /keymap|alias|binding|prefix|lsp/;
@@ -74,8 +75,31 @@ async function showUpstream(repo: string, id: string): Promise<string | undefine
   ].join("\n") + "\n";
 }
 
+/**
+ * The change's affected behaviour: the branch's tip built now with and without
+ * the change's commits (ADR 0002); the run's snapshots, labelled as history,
+ * when that can't be built (or `deps` is absent).
+ */
+async function affected(repo: string, tip: string, commits: ChangeCommit[], host: string, deps?: BuildDeps): Promise<string[]> {
+  const list = (findings: Finding[]) =>
+    findings.length ? findings.map((f) => `  ${f.kind} ${f.subject}${f.detail ? `: ${f.detail}` : ""}`) : ["  none"];
+  let why = "not built";
+  if (deps) {
+    const sha = (await git(repo, "rev-parse", tip)).trim();
+    const withIt = await buildSide(repo, sha, deps);
+    const without = withIt.ok ? await buildSide(repo, sha, deps, (d) => revertCommits(d, commits.map((c) => c.sha))) : withIt;
+    if (withIt.ok && without.ok) return [`Affected keymaps, aliases and language servers (${sha.slice(0, 12)} built with and without it):`, ...list(affectedBehaviour(without.t3, withIt.t3))];
+    why = (withIt.ok ? `without it: ${without.ok ? "" : without.error}` : withIt.error).split("\n")[0]!;
+  }
+  const { before, after } = await snapshotsAround(repo, commits[0]!.sha, commits.at(-1)!.sha, tip, host);
+  const out = [`Affected keymaps, aliases and language servers (history: the run's snapshots, ${why}; they may miss later edits or include upstream changes):`];
+  if (!before || !after) out.push(`  (no ${before ? "snapshot after" : "earlier snapshot before"} this change to compare)`);
+  else out.push(...list(affectedBehaviour(before, after)));
+  return out;
+}
+
 /** `flake-agent show <id>`: upstream reason, diff, affected behaviour, available alternative. */
-export async function showChange(repo: string, id: string, host: string): Promise<string | undefined> {
+export async function showChange(repo: string, id: string, host: string, deps?: BuildDeps): Promise<string | undefined> {
   // the newest branch carrying this id
   const shas = (await git(repo, "log", "--all", "--format=%H", "-F", `--grep=Change-Id: ${id}`)).split("\n").filter(Boolean);
   if (shas.length === 0) return showUpstream(repo, id);
@@ -89,14 +113,7 @@ export async function showChange(repo: string, id: string, host: string): Promis
   out.push(first.subject, "", withoutTrailers(first.body));
   if (first.trailers.Upstream) out.push("", `Upstream: ${first.trailers.Upstream}`);
 
-  const { before, after } = await snapshotsAround(repo, first.sha, last.sha, tip, host);
-  out.push("", "Affected keymaps, aliases and language servers:");
-  if (!before || !after) {
-    out.push(`  (no ${before ? "snapshot after" : "earlier snapshot before"} this change to compare)`);
-  } else {
-    const findings = affectedBehaviour(before, after);
-    out.push(...(findings.length ? findings.map((f) => `  ${f.kind} ${f.subject}${f.detail ? `: ${f.detail}` : ""}`) : ["  none"]));
-  }
+  out.push("", ...(await affected(repo, tip, commits, host, deps)));
 
   const notes = await fileAt(repo, last.sha, `.flake-agent/changes/${id}/notes.md`);
   const patch = await fileAt(repo, last.sha, `.flake-agent/changes/${id}/keep-old.patch`);

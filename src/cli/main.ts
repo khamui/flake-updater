@@ -18,6 +18,7 @@ import { captureKeepOld } from "../agent/keepold.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
 import { USER_REQUEST_DIR, decideMode, realDeps, switchService } from "../switch/switch.js";
 import { prepareRevert } from "../revert/revert.js";
+import type { BuildDeps } from "../revert/sides.js";
 import { PREFERENCES } from "../guard/structure.js";
 import type { T3Snapshot } from "../probes/t3.js";
 import { readLastSwitch, realRollbackDeps, rollbackService } from "../switch/rollback.js";
@@ -26,6 +27,23 @@ import { showChange } from "../report/show.js";
 import { realHelperDeps, tick, type HelperState } from "../helper/helper.js";
 
 const AGENT_STATE = "/var/lib/flake-agent";
+/** Build a tree's system and snapshot it (ADR 0002: `show` and `revert` build both sides now). */
+function buildDeps(t: Target): BuildDeps {
+  return {
+    async build(dir) {
+      const r = await capture("nix", ["build", "--no-link", "--print-out-paths", configAttr({ ...t, flake: dir }, "config.system.build.toplevel")], {
+        env: process.env as Record<string, string>,
+        timeoutMs: 3 * 3600_000,
+      });
+      return r.code === 0 ? { ok: true, toplevel: r.stdout.trim().split("\n").at(-1) } : { ok: false, error: r.stderr.trim().split("\n").slice(-10).join("\n") };
+    },
+    async snapshot(dir, toplevel) {
+      const files = await snapshotSystem(dir, { ...t, flake: dir }, toplevel);
+      return JSON.parse(await readFile(files.find((f) => f.endsWith("t3.json"))!, "utf8")) as T3Snapshot;
+    },
+  };
+}
+
 /** The module's agent config, for the user's own commands (revert). */
 const ETC_CONFIG = "/etc/flake-agent/config.json";
 const SWITCH_STATE = "/var/lib/flake-agent-switch";
@@ -251,7 +269,8 @@ async function main(argv: string[]): Promise<number> {
       }
       // installed: the agent's clone holds every run's branch
       const from = values.repo ? repo : (await isInstalled()) ? join(AGENT_STATE, "repo") : repo;
-      const text = await showChange(from, id, target.host);
+      process.stderr.write("Building the change's branch with and without it…\n");
+      const text = await showChange(from, id, target.host, buildDeps(target));
       if (!text) {
         process.stderr.write(`show: no change ${id} in ${from}\n`);
         return 1;
@@ -286,22 +305,7 @@ async function main(argv: string[]): Promise<number> {
             return /^y(es)?$/i.test(answer.trim()) ? text : undefined;
           },
         },
-        {
-          out,
-          async build(dir) {
-            const r = await capture("nix", ["build", "--no-link", "--print-out-paths", configAttr({ ...t, flake: dir }, "config.system.build.toplevel")], {
-              env: process.env as Record<string, string>,
-              timeoutMs: 3 * 3600_000,
-            });
-            return r.code === 0
-              ? { ok: true, toplevel: r.stdout.trim().split("\n").at(-1) }
-              : { ok: false, error: r.stderr.trim().split("\n").slice(-10).join("\n") };
-          },
-          async snapshot(dir, toplevel) {
-            const files = await snapshotSystem(dir, { ...t, flake: dir }, toplevel);
-            return JSON.parse(await readFile(files.find((f) => f.endsWith("t3.json"))!, "utf8")) as T3Snapshot;
-          },
-        },
+        { out, ...buildDeps(t) },
       );
       out(`${result.method === "keep-old" ? "Applied keep-old.patch" : "Reverted the change's commits"} on ${result.branch} (${result.commit.slice(0, 12)})\n`);
       const finding = (f: { kind: string; subject: string; detail?: string }) => `${f.kind} ${f.subject}${f.detail ? `: ${f.detail}` : ""}`;

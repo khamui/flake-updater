@@ -6,15 +6,12 @@ import { DEEP_PROBES } from "../probes/deep/index.js";
 import type { Finding } from "../probes/t0.js";
 import { diffT3, type T3Snapshot } from "../probes/t3.js";
 import { PREFERENCES } from "../guard/structure.js";
-import { changeCommits, fileAt, snapshotsAround } from "../report/show.js";
+import { changeCommits, fileAt } from "../report/show.js";
+import { buildSide, revertCommits, type BuildDeps } from "./sides.js";
 
 const ID = /^[a-z0-9][a-z0-9.-]*$/;
 
-export interface RevertDeps {
-  /** Build the worktree's system. */
-  build: (dir: string) => Promise<{ ok: boolean; toplevel?: string; error?: string }>;
-  /** Snapshot the built system into the worktree's snapshot dir; its T3 part. */
-  snapshot: (dir: string, toplevel: string) => Promise<T3Snapshot>;
+export interface RevertDeps extends BuildDeps {
   out: (text: string) => void;
 }
 
@@ -34,12 +31,12 @@ export interface RevertResult {
   /** main when the revert branched: the handoff fast-forwards only from here. */
   base: string;
   method: "keep-old" | "revert";
-  /** The change's behaviour differences, as the probes saw them before and after it. */
+  /** The change's behaviour differences (main without it vs main), undone by the revert or not. */
   restored: Finding[];
   notRestored: Finding[];
-  /** What the revert changed, per the probes: the snapshot after the change vs the revert's. */
+  /** What the revert changed, per the probes: main vs the revert. */
   effect: Finding[];
-  /** Why the probe comparison is partial or missing. */
+  /** Why the probe comparison is partial. */
   caveat?: string;
   noted: boolean;
 }
@@ -47,9 +44,9 @@ export interface RevertResult {
 const key = (f: Finding) => `${f.kind} ${f.subject}`;
 
 /**
- * Which of a change's behaviour differences (snapshot before it → after it) the
- * revert undid: a difference still present against the snapshot before the
- * change (same kind and subject) is not restored.
+ * Which of a change's behaviour differences (`before`: main without it →
+ * `after`: main) the revert undid: a difference still present against
+ * `before` (same kind and subject) is not restored.
  */
 export function confirmRevert(before: T3Snapshot, after: T3Snapshot, reverted: T3Snapshot): { restored: Finding[]; notRestored: Finding[] } {
   const change = diffT3(before, after, DEEP_PROBES);
@@ -72,8 +69,9 @@ export function revertMessage(id: string, subject: string, how: string, r: Pick<
  * `flake-agent revert <id>`, run by the user: on a new branch
  * `agent/revert-<id>` off main (in a scratch worktree, so the user's checkout
  * is untouched) apply the change's keep-old.patch, or `git revert` its commits
- * when there is none; build, probe, and confirm the change's behaviour
- * differences are gone; commit, and append the user's note to PREFERENCES.md.
+ * when there is none; commit, and append the user's note to PREFERENCES.md.
+ * Whether it restores is decided from builds made now, on main's lock (ADR
+ * 0002): main, main without the change's commits, and the revert.
  * Throws, leaving no branch behind, if it doesn't apply, build or restore.
  */
 export async function prepareRevert(o: RevertOptions, deps: RevertDeps): Promise<RevertResult> {
@@ -93,10 +91,10 @@ export async function prepareRevert(o: RevertOptions, deps: RevertDeps): Promise
     );
   }
   const first = commits[0]!;
-  const last = commits.at(-1)!;
   const patch = await fileAt(o.repo, base, `.flake-agent/changes/${o.id}/keep-old.patch`);
   const method = patch ? "keep-old" : "revert";
   const note = await o.note?.(first.subject);
+  const shas = commits.map((c) => c.sha);
 
   let branch = `agent/revert-${o.id}`;
   for (let n = 2; (await capture("git", ["-C", o.repo, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0; n++) {
@@ -116,10 +114,9 @@ export async function prepareRevert(o: RevertOptions, deps: RevertDeps): Promise
       if (applied.code !== 0) throw new Error(`keep-old.patch no longer applies to ${o.mainBranch}: ${applied.stderr.trim()}`);
       how = `Applies .flake-agent/changes/${o.id}/keep-old.patch, the closest old behaviour.`;
     } else {
-      const shas = commits.map((c) => c.sha).reverse();
-      const reverted = await capture("git", ["-C", dir, "revert", "--no-commit", ...shas]);
-      if (reverted.code !== 0) throw new Error(`git revert failed: ${reverted.stderr.trim().split("\n")[0]}`);
-      how = `Reverts ${shas.map((s) => s.slice(0, 12)).join(", ")}.`;
+      const failed = await revertCommits(dir, shas);
+      if (failed) throw new Error(failed);
+      how = `Reverts ${[...shas].reverse().map((s) => s.slice(0, 12)).join(", ")}.`;
     }
     // flakes only see tracked files
     await git(dir, "add", "-A");
@@ -129,24 +126,26 @@ export async function prepareRevert(o: RevertOptions, deps: RevertDeps): Promise
     if (!built.ok || !built.toplevel) throw new Error(`the revert does not build:\n${built.error ?? ""}`);
     const reverted = await deps.snapshot(dir, built.toplevel);
 
+    deps.out(`Building ${o.mainBranch}${patch ? ` and ${o.mainBranch} without ${o.id}` : ""}\n`);
+    const main = await buildSide(o.repo, base, deps);
+    if (!main.ok) throw new Error(`${o.mainBranch} ${main.error}`);
+    // the change's differences: main without its commits vs main; the revert itself when it is exactly that
+    const without = patch ? await buildSide(o.repo, base, deps, (d) => revertCommits(d, shas)) : ({ ok: true, toplevel: built.toplevel, t3: reverted } as const);
     let restored: Finding[] = [];
     let notRestored: Finding[] = [];
-    let effect: Finding[] = [];
     let caveat: string | undefined;
-    const around = await snapshotsAround(o.repo, first.sha, last.sha, base, o.host);
-    if (!around.before || !around.after) {
-      caveat = "No probe snapshots around the change: only the build was checked.";
+    if (!without.ok) {
+      caveat = `${o.mainBranch} without the change's commits: ${without.error.split("\n")[0]}; only the revert's own build was checked.`;
     } else {
-      ({ restored, notRestored } = confirmRevert(around.before, around.after, reverted));
-      effect = diffT3(around.after, reverted, DEEP_PROBES);
-      const sameLock = (await fileAt(o.repo, around.beforeAt, "flake.lock")) === (await fileAt(o.repo, around.afterAt!, "flake.lock"));
-      if (notRestored.length && sameLock) {
+      if (without.toplevel === main.toplevel) {
+        throw new Error(`${o.mainBranch} builds the same system without ${o.id}: there is nothing to revert`);
+      }
+      ({ restored, notRestored } = confirmRevert(without.t3, main.t3, reverted));
+      if (notRestored.length) {
         throw new Error(`the revert does not restore the old behaviour:\n${notRestored.map((f) => `  ${line(f)}`).join("\n")}`);
       }
-      if (!sameLock && notRestored.length) {
-        caveat = `${notRestored.length} difference${notRestored.length === 1 ? "" : "s"} from before the change remain${notRestored.length === 1 ? "s" : ""}; that snapshot was taken on an older lock, so they are likely upstream's (flake-agent show ${o.id}).`;
-      }
     }
+    const effect = diffT3(main.t3, reverted, DEEP_PROBES);
 
     await commitMessage(dir, revertMessage(o.id, first.subject, how, { restored, effect, caveat }));
     await git(dir, "add", ".flake-agent/snapshots");
