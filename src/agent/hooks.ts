@@ -199,14 +199,14 @@ function deny(reason: string): HookJSONOutput {
 const allow: HookJSONOutput = {};
 
 /** PreToolUse hooks for the SDK; `onDeny` sees every refusal (for the report and tests). */
-export function preToolUseHooks(ctx: HookContext, onDeny: (tool: string, reason: string) => void = () => {}): HookCallbackMatcher[] {
+export function preToolUseHooks(ctx: HookContext, onDeny: (tool: string, reason: string, input: Record<string, unknown>) => void = () => {}): HookCallbackMatcher[] {
   const wrap =
     (check: (tool: string, input: Record<string, unknown>) => Promise<Decision> | Decision) =>
     async (input: unknown): Promise<HookJSONOutput> => {
       const i = input as { tool_name: string; tool_input: Record<string, unknown> };
       const d = await check(i.tool_name, i.tool_input ?? {});
       if (!d) return allow;
-      onDeny(i.tool_name, d);
+      onDeny(i.tool_name, d, i.tool_input ?? {});
       return deny(d);
     };
   return [
