@@ -4,6 +4,7 @@ import { configAttr } from "../discovery/discover.js";
 import { capture, run } from "../nix/exec.js";
 import { acquireLock } from "../preflight/environment.js";
 import { probeAll, probeFailures, snapshotSystem, type ProbeRun } from "../probes/all.js";
+import { upstreamT1, type T1Snapshot } from "../probes/t1.js";
 import { changesEntry, prependEntry, runUpstream } from "../report/report.js";
 import { upstreamNotes, upstreamNotesPath } from "../report/upstream.js";
 import type { AgentConfig } from "./config.js";
@@ -27,6 +28,8 @@ export interface RunRecord {
   lockCommit?: string;
   /** Upstream-only findings left as they are (not failures), for the report. */
   behaviourChanges?: string[];
+  /** Generated files only the new lock changed (T1, upstream-only), `- <kind> <file>`. */
+  upstreamFiles?: string[];
   /** Inputs kept at their previous revision because they are broken upstream. */
   pinned?: string[];
   /** Each behaviour change's way back, built and probed on the final commit. */
@@ -195,6 +198,9 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
     }
     let toplevel: string | undefined;
     let failing = 0;
+    /** The latest probes, and T1 of the latest build with no agent commit on the lock. */
+    let probed: ProbeRun | undefined;
+    let lockT1: T1Snapshot | undefined;
     /** Build HEAD (uncommitted edits discarded), probe, commit the snapshots. */
     const verify = async (): Promise<Verification> => {
       await git.run("reset", "-q", "--hard", "HEAD");
@@ -205,11 +211,15 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
       });
       if (built.code !== 0) {
         toplevel = undefined;
+        probed = undefined;
         return { status: "build-failed", problems: `nix build failed:\n${tail(built.stderr, 25)}` };
       }
       toplevel = built.stdout.trim().split("\n").at(-1)!;
       const probes = await probeAll(dir, target, against, toplevel);
       failing = probeFailures(probes).length;
+      probed = probes;
+      const since = (await git.run("log", "--format=%s", `${lockCommit}..HEAD`)).split("\n").filter(Boolean);
+      if (since.every((s) => s.startsWith("snapshots: ") || s.startsWith("flake.lock: "))) lockT1 = probes.t1Snapshots.new;
       await git.run("add", ".flake-agent/snapshots");
       if ((await git.run("status", "--porcelain", ".flake-agent/snapshots")) !== "") {
         await git.run("commit", "-q", "-m", `snapshots: probes on ${(await git.run("rev-parse", "--short", "HEAD"))}\n\n${summary(probes)}`);
@@ -296,6 +306,11 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
       }
     }
 
+    // generated files the new lock alone changed: only known when both builds were probed
+    const files = probed && lockT1 ? await upstreamT1(probed.t1Snapshots.old, lockT1, probed.t1Snapshots.new) : [];
+    const upstreamFiles = files.map((c) => `- ${c.kind} ${c.subject}`);
+    const diffs = new Map(files.map((c) => [`${c.kind} ${c.subject}`, c.detail]));
+
     const record: RunRecord = {
       at,
       status,
@@ -308,6 +323,7 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
       changes: changes.map((c) => ({ sha: c.sha, subject: c.subject, id: c.trailers["Change-Id"], class: c.trailers["Change-Class"] })),
       ...(detail ? { detail } : {}),
       ...(behaviourChanges ? { behaviourChanges } : {}),
+      ...(upstreamFiles.length ? { upstreamFiles } : {}),
       ...(pinned ? { pinned } : {}),
       ...(keepOld.length ? { keepOld } : {}),
     };
@@ -321,7 +337,7 @@ export async function updateRun(cfg: AgentConfig, stateDir: string, deps: Update
     for (const f of runUpstream(record)) {
       const notes = join(dir, upstreamNotesPath(f.id));
       await mkdir(dirname(notes), { recursive: true });
-      await writeFile(notes, upstreamNotes(f, record));
+      await writeFile(notes, upstreamNotes(f, record, diffs.get(f.finding)));
       await git.run("add", upstreamNotesPath(f.id));
     }
     await git.run("commit", "-q", "-m", `CHANGES.md: ${branch} (${status})`);

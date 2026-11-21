@@ -174,3 +174,88 @@ function sha256(data: string | Buffer): string {
 function sortKeys<T>(obj: Record<string, T>): Record<string, T> {
   return Object.fromEntries(Object.entries(obj).sort(([a], [b]) => a.localeCompare(b)));
 }
+
+/** A store path up to where a shell, Nix or config file would end it. */
+const STORE_PATH = /\/nix\/store\/[^\s"'`;:,)}\]]*/g;
+/** `26.11.20261119.0bb8272`: in /etc/os-release, /etc/issue and others on every nixpkgs bump. */
+const NIXOS_VERSION = /\b\d{2}\.\d{2}(?:pre)?\.\d{8}\.[0-9a-f]{7,}\b/g;
+
+const normalize = (line: string) => line.replace(STORE_PATH, "/nix/store/…").replace(NIXOS_VERSION, "<nixos-version>");
+
+/**
+ * What a changed file's diff changes besides store paths, the NixOS version and
+ * binaries (T0 covers packages): its remaining `-`/`+` lines, normalized and
+ * sorted; "" for a version bump.
+ */
+export function contentChange(diff: string): string {
+  const left = new Map<string, number>();
+  const added: string[] = [];
+  const rest: string[] = [];
+  for (const line of diff.split("\n")) {
+    if (/^(Binary files |diff -ru |@@ )|^(---|\+\+\+) [ab]?\//.test(line)) continue;
+    if (/^(Only in |… \d+ more lines)/.test(line)) rest.push(normalize(line));
+    else if (line.startsWith("-")) {
+      const l = normalize(line.slice(1));
+      left.set(l, (left.get(l) ?? 0) + 1);
+    } else if (line.startsWith("+")) added.push(normalize(line.slice(1)));
+  }
+  const plus: string[] = [];
+  for (const l of added) {
+    const n = left.get(l) ?? 0;
+    if (n > 0) left.set(l, n - 1);
+    else plus.push(`+${l}`);
+  }
+  const minus = [...left].flatMap(([l, n]) => Array<string>(n).fill(`-${l}`));
+  return [...rest, ...minus.sort(), ...plus.sort()].join("\n");
+}
+
+/** Path segments all of `paths` share, with a trailing `/`. */
+function commonDir(paths: string[]): string {
+  const parts = paths.map((p) => p.split("/"));
+  const out: string[] = [];
+  for (let i = 0; parts.every((p) => i < p.length - 1 && p[i] === parts[0]![i]); i++) out.push(parts[0]![i]!);
+  return out.length ? `${out.join("/")}/` : "";
+}
+
+/** `etc/pam.d/ (18 files)`; without a shared directory below the top, the first file and a count. */
+function groupName(subjects: string[]): string {
+  const dir = commonDir(subjects);
+  return dir.split("/").length > 2 ? `${dir} (${subjects.length} files)` : `${subjects[0]} (+${subjects.length - 1} more)`;
+}
+
+/**
+ * Generated files the new lock alone changed (SPEC: upstream-only changes):
+ * `old` → `lock` (the lock commit's build), not touched again by the agent's
+ * commits up to `final`, and not just a version bump. Files with the same change
+ * (one PAM default in every service) are one entry: `etc/pam.d/ (18 files)`.
+ */
+export async function upstreamT1(old: T1Snapshot, lock: T1Snapshot, final: T1Snapshot, differ: Differ = unifiedDiff): Promise<T1Change[]> {
+  const changes = (await attributeT1(old, [{ snapshot: lock }, { changeId: "agent", snapshot: final }], differ)).filter(
+    (c) => c.attribution.source === "upstream",
+  );
+  const subjects = new Set(changes.map((c) => c.subject));
+  const out: T1Change[] = [];
+  const same = new Map<string, T1Change[]>();
+  for (const { attribution: _, ...c } of changes) {
+    // /etc entries' .mode/.uid/.gid files change with the entry itself
+    const meta = c.subject.match(/^(.*)\.(?:mode|uid|gid)$/);
+    if (meta && (subjects.has(meta[1]!) || old.files[meta[1]!] || final.files[meta[1]!])) continue;
+    if (c.kind !== "file-changed") {
+      out.push(c);
+      continue;
+    }
+    const change = contentChange(c.detail);
+    if (change) same.set(change, [...(same.get(change) ?? []), c]);
+  }
+  for (const group of same.values()) {
+    const first = group[0]!;
+    if (group.length === 1) out.push(first);
+    else
+      out.push({
+        ...first,
+        subject: groupName(group.map((c) => c.subject)),
+        detail: [...group.map((c) => `# ${c.subject}`), first.detail].join("\n"),
+      });
+  }
+  return out.sort((a, b) => a.subject.localeCompare(b.subject));
+}
