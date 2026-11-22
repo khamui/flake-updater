@@ -121,21 +121,40 @@ export function compareGuarded(baseline: Guarded, agent: Guarded): string[] {
   return [...reasons.slice(0, MAX_REASONS), `… ${reasons.length - MAX_REASONS} more`];
 }
 
-export function guardApply(user: string): string {
+/**
+ * The `--apply` function: everything, the guarded values only, or only the
+ * init-file scan (the part that builds: reading nvf's init.lua builds its plugins).
+ */
+export function guardApply(user: string, part: "all" | "values" | "scan" = "all"): string {
   if (!/^[a-z_][a-z0-9_-]*$/.test(user)) throw new Error(`invalid user name: ${user}`);
-  return `(${GUARD_NIX}) "${user}"`;
+  const guard = `(${GUARD_NIX}) "${user}"`;
+  if (part === "values") return `c: removeAttrs (${guard} c) ["scan"]`;
+  if (part === "scan") return `c: (${guard} c).scan`;
+  return guard;
 }
 
-/** Evaluate the guarded values of `host` in a flake checked out at `dir`. */
-export async function evalGuarded(dir: string, host: string, user: string): Promise<Guarded> {
+async function evalPart(dir: string, host: string, user: string, part: "all" | "values" | "scan"): Promise<unknown> {
   const json = await run("nix", [
     "eval",
     "--json",
     configAttr({ flake: `path:${dir}`, host, user }),
     "--apply",
-    guardApply(user),
+    guardApply(user, part),
   ]);
-  return JSON.parse(json) as Guarded;
+  return JSON.parse(json);
+}
+
+/** Evaluate the guarded values of `host` in a flake checked out at `dir`. */
+export async function evalGuarded(dir: string, host: string, user: string): Promise<Guarded> {
+  return (await evalPart(dir, host, user, "all")) as Guarded;
+}
+
+/** The nix error itself, not the trace around it. */
+export function evalError(message: string): string {
+  const lines = message.split("\n");
+  const at = lines.findIndex((l) => /^\s*error:/.test(l));
+  const picked = at >= 0 ? lines.slice(at, at + 3) : lines.slice(-3);
+  return picked.map((l) => l.trim()).join(" ").slice(0, 300);
 }
 
 async function git(repo: string, ...args: string[]): Promise<string> {
@@ -180,6 +199,8 @@ export async function structuralReasons(opts: GuardOptions, base: string, rev: s
  * the guarded options. The baseline is where the agent branch left main, so
  * edits of mine — before the branch point on both sides, after it on neither —
  * never trigger; and both sides share the rev's lock, so upstream changes don't either.
+ * Only the init-file scan falls back to the baseline's own lock, when the old
+ * config no longer builds on the new one.
  */
 export async function runGuard(opts: GuardOptions): Promise<GuardResult> {
   const rev = await git(opts.repo, "rev-parse", "--verify", `${opts.rev}^{commit}`);
@@ -195,16 +216,22 @@ export async function runGuard(opts: GuardOptions): Promise<GuardResult> {
     await writeFile(join(baseDir, "flake.lock"), await run("git", ["-C", opts.repo, "show", `${rev}:flake.lock`]));
 
     try {
-      const [{ scan: baseScan, ...baseline }, { scan: agentScan, ...agent }] = await Promise.all([
-        evalGuarded(baseDir, opts.host, opts.user),
-        evalGuarded(revDir, opts.host, opts.user),
-      ]);
-      reasons.push(...compareGuarded(baseline, agent));
+      const part = (dir: string, p: "values" | "scan") => evalPart(dir, opts.host, opts.user, p);
+      const [baseline, agent, agentScan] = await Promise.all([part(baseDir, "values"), part(revDir, "values"), part(revDir, "scan")]);
+      reasons.push(...compareGuarded(baseline as Guarded, agent as Guarded));
       // init files are scanned, not compared: a legitimate fix may change them
+      const baseScan = await part(baseDir, "scan").catch(async () => {
+        // the old config doesn't build on the new lock (the agent's fix may be what
+        // repairs it): scan against what it renders on its own lock, i.e. today
+        const ownDir = join(work, "base-own-lock");
+        await mkdir(ownDir);
+        await checkout(opts.repo, base, ownDir);
+        return part(ownDir, "scan");
+      });
       reasons.push(...renderedFlagViolations((baseScan ?? {}) as Record<string, string | null>, (agentScan ?? {}) as Record<string, string | null>));
     } catch (err) {
       // what can't be evaluated can't be checked
-      reasons.push(`eval: ${(err as Error).message.split("\n").slice(-3).join(" ").slice(0, 300)}`);
+      reasons.push(`eval: ${evalError((err as Error).message)}`);
     }
     return { verdict: reasons.length ? "block" : "pass", reasons, base, rev };
   } finally {

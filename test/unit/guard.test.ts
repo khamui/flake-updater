@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { GUARD_NIX } from "../../src/guard/expr.js";
-import { compareGuarded, guardApply, type Guarded } from "../../src/guard/guard.js";
+import { compareGuarded, evalError, guardApply, type Guarded } from "../../src/guard/guard.js";
 
 const h = (c: string) => c.repeat(32);
 
@@ -126,5 +126,17 @@ describe("guard expression", () => {
   it("refuses user names that could inject Nix code", () => {
     expect(() => guardApply('x" + builtins.readFile /etc/shadow + "')).toThrow();
     expect(guardApply("kha")).toMatch(/\) "kha"$/);
+  });
+
+  it("evaluates the scan apart from the values: only the scan builds", () => {
+    expect(guardApply("kha", "values")).toMatch(/^c: removeAttrs \(.*\) "kha" c\) \["scan"\]$/s);
+    expect(guardApply("kha", "scan")).toMatch(/^c: \(.*\) "kha" c\)\.scan$/s);
+    expect(() => guardApply("x\" + y", "scan")).toThrow();
+  });
+
+  it("reports the nix error, not the trace after it", () => {
+    const msg = ["trace: Obsolete option used", "error: Cannot build '/nix/store/x-tsls.drv'.", "       Reason: builder failed with exit code 1.", "       > ERROR: pnpm failed", "       Output paths:", "         /nix/store/y-nvf-init.lua"].join("\n");
+    expect(evalError(msg)).toBe("error: Cannot build '/nix/store/x-tsls.drv'. Reason: builder failed with exit code 1. > ERROR: pnpm failed");
+    expect(evalError("a\nb\nc\nd")).toBe("b c d");
   });
 });
