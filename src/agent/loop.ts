@@ -109,6 +109,22 @@ export async function fixLoop(
 
 export const AGENT_TOOLS = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "WebFetch"];
 
+/**
+ * The session's whole environment. SHELL is explicit: without it Claude Code
+ * falls back to the agent user's login shell (nologin) and its Bash tool fails
+ * with "No suitable shell found". The package wrapper sets FLAKE_AGENT_SHELL.
+ */
+export function sessionEnv(env: NodeJS.ProcessEnv, home: string, token?: string): Record<string, string> {
+  return {
+    PATH: env.PATH ?? "",
+    HOME: home,
+    SHELL: env.FLAKE_AGENT_SHELL ?? env.SHELL ?? "/bin/sh",
+    NIX_REMOTE: env.NIX_REMOTE ?? "",
+    ...(token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : {}),
+    CLAUDE_AGENT_SDK_CLIENT_APP: "flake-agent/fix",
+  };
+}
+
 /** One SDK session in the clone, with the hooks enforcing scope; maps quota/auth loss. */
 export async function runAgentSession(opts: {
   cfg: AgentConfig;
@@ -138,13 +154,7 @@ export async function runAgentSession(opts: {
     persistSession: false,
     systemPrompt: { type: "preset", preset: "claude_code", append: opts.system ?? rules(opts.cfg, opts.repo, month) },
     hooks: { PreToolUse: preToolUseHooks(opts.hooks, opts.onDeny) },
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: opts.home,
-      NIX_REMOTE: process.env.NIX_REMOTE ?? "",
-      ...(opts.token ? { CLAUDE_CODE_OAUTH_TOKEN: opts.token } : {}),
-      CLAUDE_AGENT_SDK_CLIENT_APP: "flake-agent/fix",
-    },
+    env: sessionEnv(process.env, opts.home, opts.token),
     ...(opts.executable ? { pathToClaudeCodeExecutable: opts.executable } : {}),
   };
 

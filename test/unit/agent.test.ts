@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { checkBash, checkFetch, checkWrite, DOC_HOSTS, githubRepos, type HookContext } from "../../src/agent/hooks.js";
-import { blockedInputs, fixLoop, modelFor, type Verification } from "../../src/agent/loop.js";
+import { blockedInputs, fixLoop, modelFor, sessionEnv, type Verification } from "../../src/agent/loop.js";
 import { parseLog, trailerProblems } from "../../src/agent/trailers.js";
 import { DEFAULTS, type AgentConfig } from "../../src/run/config.js";
 
@@ -189,5 +189,19 @@ describe("upstream-only findings", () => {
     const outcome = await fixLoop(cfg, reds, { runAgent, verify: async () => reds, out: () => {}, head: async () => "same" });
     expect(outcome).toEqual({ status: "upstream-only", iterations: 1, problems: reds.problems });
     expect(runAgent).toHaveBeenCalledOnce();
+  });
+});
+
+describe("sessionEnv", () => {
+  it("gives the session a real shell: the agent user's login shell is nologin", () => {
+    const env = sessionEnv({ PATH: "/p", FLAKE_AGENT_SHELL: "/nix/store/x-bash/bin/bash", SHELL: "/run/current-system/sw/bin/nologin" }, "/var/lib/flake-agent", "t");
+    expect(env).toMatchObject({ PATH: "/p", HOME: "/var/lib/flake-agent", SHELL: "/nix/store/x-bash/bin/bash", CLAUDE_CODE_OAUTH_TOKEN: "t" });
+  });
+
+  it("keeps the developer's shell outside the package, and passes nothing else through", () => {
+    const env = sessionEnv({ PATH: "/p", SHELL: "/bin/zsh", SECRET: "x" }, "/h");
+    expect(env.SHELL).toBe("/bin/zsh");
+    expect(env).not.toHaveProperty("SECRET");
+    expect(env).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
   });
 });
