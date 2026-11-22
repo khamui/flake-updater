@@ -7,7 +7,7 @@ import { configAttr, discoverPackages, type Target } from "../discovery/discover
 import { formatProbeRun, nvdDiff, probeAll, probeFailures, snapshotSystem } from "../probes/all.js";
 import { capture, run } from "../nix/exec.js";
 import { runGuard, type GuardOptions } from "../guard/guard.js";
-import { runCycle, skip, status } from "../preflight/cycle.js";
+import { nextCycle, nextRunLine, runCycle, skip, status } from "../preflight/cycle.js";
 import { preflight, readToken, realPreflight } from "../preflight/preflight.js";
 import { StateStore, defaultStateDir } from "../preflight/state.js";
 import { loadConfig } from "../run/config.js";
@@ -67,10 +67,12 @@ Commands:
   probe       Snapshot the live system and a fresh build, diff them
   discover    List packages the host config declares (JSON)
   guard <rev> Compare guarded options of <rev> with where it left main; exit 1 = block
-  run         Preflight (credential, subscription, AC, disk, lock), then one update cycle
+  run         Preflight (credential, subscription, AC, disk, lock), then one update cycle;
+              the next scheduled one is intervalDays after it (--if-due: the hourly timer,
+              runs only when due). Installed: starts the agent service
   retry       After a failed preflight: preflight again, then run
   skip        Dismiss a failed run; wait for the next cycle
-  status      Last run and its changes, generation, last switch, preflight, pending choice
+  status      Last run and its changes, generation, next run, last switch, preflight, pending choice
   report      Show the latest report again (--once: only if not shown yet; the shell hook)
   show <id>   A change: upstream reason, affected keymaps/aliases, alternative, diff
   revert <id> Apply the change's keep-old.patch (or git revert it), build, probe, commit
@@ -149,6 +151,7 @@ async function main(argv: string[]): Promise<number> {
       "user-request-dir": { type: "string" },
       "revert-request-dir": { type: "string" },
       yes: { type: "boolean", short: "y" },
+      "if-due": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -390,7 +393,8 @@ async function main(argv: string[]): Promise<number> {
       const out = (text: string) => process.stdout.write(text);
       // with the module installed, a user's retry/skip act on the system service
       if (!values["state-dir"] && process.getuid?.() !== 0 && (await isInstalled())) {
-        if (command === "retry") {
+        // the service itself runs `run --config`: only the user's plain `run` starts it
+        if (command === "retry" || (command === "run" && !values.config)) {
           const r = await capture("systemctl", ["start", "--no-block", "flake-agent.service"], { env: process.env as Record<string, string> });
           out(r.code === 0 ? "Run started: flake-agent.service\n" : `Could not start flake-agent.service: ${r.stderr.trim()}\n`);
           return r.code === 0 ? 0 : 1;
@@ -537,8 +541,19 @@ async function main(argv: string[]): Promise<number> {
         return record.status === "green" || record.status === "up-to-date" ? 0 : 1;
       };
       // --no-preflight: exercise the AI-free run without a subscription (testing only)
+      if (values["if-due"]) {
+        // the hourly timer: a run is due intervalDays after the last cycle, however that one started
+        const now = new Date();
+        const s = await state.load();
+        const next = nextCycle(s, cfg.intervalDays);
+        if (next && next > now) {
+          if (s.nextCycle !== next.toISOString()) await state.update((x) => ({ ...x, nextCycle: next.toISOString() }));
+          out(`Not due: ${nextRunLine({ nextCycle: next.toISOString() }, now).replace(/^Next run: /, "next run ")}\n`);
+          return 0;
+        }
+      }
       if (values["no-preflight"]) return update();
-      return runCycle({ state, preflight: () => preflight(checks), update, out });
+      return runCycle({ state, preflight: () => preflight(checks), update, out, intervalDays: cfg.intervalDays });
     }
     default:
       process.stderr.write(`unknown command: ${command}\n\n${HELP}`);

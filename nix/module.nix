@@ -12,8 +12,52 @@ self: {
   stateDir = "/var/lib/flake-agent";
 
   agentConfig = pkgs.writeText "flake-agent.json" (builtins.toJSON {
-    inherit (cfg) repo host user mainBranch model escalationModel maxFixIterations diffLimit minFreeGB selfInput writeScope idleMinutes idleFallbackHours extraSources;
+    inherit (cfg) repo host user mainBranch model escalationModel maxFixIterations diffLimit minFreeGB selfInput writeScope intervalDays idleMinutes idleFallbackHours extraSources;
   });
+
+  # The update run, sandboxed (SPEC §7): started by hand, or by the timer with --if-due.
+  agentService = {
+    description,
+    args,
+  }: {
+    inherit description;
+    after = ["network-online.target"];
+    wants = ["network-online.target"];
+    unitConfig.ConditionACPower = true;
+    path = [config.nix.package];
+    environment = {
+      HOME = stateDir;
+      # nix builds through the daemon; the agent user has no store of its own
+      NIX_REMOTE = "daemon";
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      User = "flake-agent";
+      Group = "flake-agent";
+      ExecStart = "${lib.getExe cfg.package} run --config ${agentConfig}${args}";
+      TimeoutStartSec = cfg.timeout;
+      StateDirectory = "flake-agent";
+      # readable by the flake-agent group (the user): state, report, clone
+      StateDirectoryMode = "0750";
+      WorkingDirectory = stateDir;
+      LoadCredential = "claude-token:${cfg.tokenFile}";
+
+      # sandbox (SPEC §7); ProtectHome=tmpfs is ProtectHome=true that still allows the .git bind
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = "tmpfs";
+      BindReadOnlyPaths = ["${cfg.repo}/.git"];
+      ReadWritePaths = [stateDir];
+      PrivateTmp = true;
+      PrivateDevices = true;
+      CapabilityBoundingSet = "";
+      RestrictSUIDSGID = true;
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectControlGroups = true;
+      LockPersonality = true;
+    };
+  };
 
   reportHook = ''
     if [ "$USER" = ${lib.escapeShellArg cfg.user} ]; then
@@ -60,10 +104,14 @@ in {
       description = "Branch the agent branches from.";
     };
 
-    schedule = mkOption {
-      type = types.str;
-      default = "weekly";
-      description = "systemd OnCalendar expression for the run.";
+    intervalDays = mkOption {
+      type = types.ints.positive;
+      default = 7;
+      description = ''
+        Days between runs, counted from the last one: a manual run
+        (`flake-agent run`, retry) moves the next scheduled one. The timer
+        checks hourly; `flake-agent status` shows the time left.
+      '';
     };
 
     model = mkOption {
@@ -165,44 +213,14 @@ in {
     };
     users.groups.flake-agent = {};
 
-    systemd.services.flake-agent = {
+    systemd.services.flake-agent = agentService {
       description = "flake-agent update run";
-      after = ["network-online.target"];
-      wants = ["network-online.target"];
-      unitConfig.ConditionACPower = true;
-      path = [config.nix.package];
-      environment = {
-        HOME = stateDir;
-        # nix builds through the daemon; the agent user has no store of its own
-        NIX_REMOTE = "daemon";
-      };
-      serviceConfig = {
-        Type = "oneshot";
-        User = "flake-agent";
-        Group = "flake-agent";
-        ExecStart = "${lib.getExe cfg.package} run --config ${agentConfig}";
-        TimeoutStartSec = cfg.timeout;
-        StateDirectory = "flake-agent";
-        # readable by the flake-agent group (the user): state, report, clone
-        StateDirectoryMode = "0750";
-        WorkingDirectory = stateDir;
-        LoadCredential = "claude-token:${cfg.tokenFile}";
-
-        # sandbox (SPEC §7); ProtectHome=tmpfs is ProtectHome=true that still allows the .git bind
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = "tmpfs";
-        BindReadOnlyPaths = ["${cfg.repo}/.git"];
-        ReadWritePaths = [stateDir];
-        PrivateTmp = true;
-        PrivateDevices = true;
-        CapabilityBoundingSet = "";
-        RestrictSUIDSGID = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
-        LockPersonality = true;
-      };
+      args = "";
+    };
+    # the timer's unit: the same run, only when intervalDays have passed since the last cycle
+    systemd.services.flake-agent-due = agentService {
+      description = "flake-agent scheduled check";
+      args = " --if-due";
     };
 
     # Root, no AI: re-runs the guard on the exact commit the agent asked for,
@@ -288,13 +306,15 @@ in {
     };
     boot.loader.systemd-boot.configurationLimit = lib.mkDefault 10;
 
+    # hourly: the run itself decides whether intervalDays have passed (a manual run moves the schedule)
     systemd.timers.flake-agent = {
       description = "flake-agent update schedule";
       wantedBy = ["timers.target"];
       timerConfig = {
-        OnCalendar = cfg.schedule;
+        OnCalendar = "hourly";
         Persistent = true;
-        RandomizedDelaySec = "15min";
+        RandomizedDelaySec = "5min";
+        Unit = "flake-agent-due.service";
       };
     };
   };
