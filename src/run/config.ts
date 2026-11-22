@@ -24,6 +24,8 @@ export interface AgentConfig {
   against: string;
   /** Extra domains WebFetch may reach. */
   extraSources: string[];
+  /** Days between cycles, counted from the last one (a manual run moves the next). */
+  intervalDays: number;
   /** A live switch waits for this much user idle time... */
   idleMinutes: number;
   /** ...for at most this long, then only the boot entry is set. */
@@ -41,6 +43,7 @@ export const DEFAULTS: Omit<AgentConfig, "repo" | "host" | "user"> = {
   writeScope: { allow: [], deny: [] },
   against: "base",
   extraSources: [],
+  intervalDays: 7,
   idleMinutes: 15,
   idleFallbackHours: 24,
 };

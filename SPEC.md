@@ -90,7 +90,7 @@ services.flake-agent = {
   repo = "/home/khamui/Repos/nixos-config";
   host = config.networking.hostName;   # flake output to build
   user = "khamui";                     # whose HM config/session to probe and notify
-  schedule = "weekly";
+  intervalDays = 7;                    # counted from the last run, manual ones included
   model = "claude-sonnet-5-5";
   escalationModel = "claude-opus-5-5";
   minGenerations = 5;
@@ -377,11 +377,11 @@ The change stays on its branch, the report marks it "needs review" with the guar
 
 ## Scheduling and secrets
 
-- systemd timer, weekly, `Persistent=true`, `ConditionACPower=true`
+- Runs every `intervalDays` (7), counted from the last cycle however it started: a manual `flake-agent run` or a retry moves the next one. A systemd timer checks hourly (`Persistent=true`, `ConditionACPower=true`); `flake-agent status` shows the time left (`Next run: in 5 d 23 h 41 min (Sat 28 Nov, 14:05)`).
 - One run at a time (lock file); run cancelled after 60 minutes
 - Claude subscription token from `claude setup-token`, stored as a root-owned file outside the Nix store and the repo, passed via `LoadCredential=`. No sops/agenix in v1.
 
-Module options cover: `repo`, `host`, `user`, `schedule`, `model`, `escalationModel`, `maxFixIterations` (3), `diffLimit` (60), `idleMinutes` (15), `idleFallbackHours` (24), `minGenerations` (5), `minFreeGB` (10), `writeScope.allow/deny`, `extraSources`, `tokenFile`.
+Module options cover: `repo`, `host`, `user`, `intervalDays` (7), `model`, `escalationModel`, `maxFixIterations` (3), `diffLimit` (60), `idleMinutes` (15), `idleFallbackHours` (24), `minGenerations` (5), `minFreeGB` (10), `writeScope.allow/deny`, `extraSources`, `tokenFile`.
 
 ## Testing
 

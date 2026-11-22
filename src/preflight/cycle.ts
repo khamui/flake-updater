@@ -1,6 +1,6 @@
 import { CHOICE, changeLines, runUpstream } from "../report/report.js";
 import type { SwitchRecord } from "../switch/switch.js";
-import type { StateStore } from "./state.js";
+import type { RunState, StateStore } from "./state.js";
 import type { PreflightFailure } from "./subscription.js";
 
 export interface CycleDeps {
@@ -9,6 +9,9 @@ export interface CycleDeps {
   /** The update run itself; only reached after preflight passed. */
   update: () => Promise<number>;
   out: (text: string) => void;
+  /** Days until the next scheduled cycle, counted from this one's start. */
+  intervalDays?: number;
+  now?: Date;
 }
 
 /** Exit code when preflight fails: nothing ran, the user chooses retry or skip. */
@@ -16,20 +19,58 @@ export const PREFLIGHT_FAILED = 3;
 
 export { CHOICE };
 
-/** One cycle (`run`, and `retry` after a failure): preflight, then the update. */
+const DAY_MS = 24 * 60 * 60_000;
+
+/** When the next scheduled cycle is due: `intervalDays` after the last one, any way it was started. */
+export function nextCycle(s: RunState, intervalDays: number): Date | undefined {
+  return s.lastCycle ? new Date(Date.parse(s.lastCycle) + intervalDays * DAY_MS) : undefined;
+}
+
+/** "5 d 23 h 41 min": the time left until `to`, to the minute. */
+export function timeLeft(to: Date, now: Date): string {
+  const minutes = Math.floor((to.getTime() - now.getTime()) / 60_000);
+  if (minutes < 1) return "under a minute";
+  const parts = [
+    [Math.floor(minutes / 1440), "d"],
+    [Math.floor((minutes % 1440) / 60), "h"],
+    [minutes % 60, "min"],
+  ] as const;
+  return parts
+    .filter(([n]) => n > 0)
+    .map(([n, unit]) => `${n} ${unit}`)
+    .join(" ");
+}
+
+const when = (d: Date) => d.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+/** The status line for the schedule; the timer checks hourly and only on AC power. */
+export function nextRunLine(s: RunState, now: Date): string {
+  if (!s.nextCycle) return "Next run: at the next hourly check (none has run yet)";
+  const next = new Date(s.nextCycle);
+  if (next <= now) return `Next run: due since ${when(next)}; starts at the next hourly check on AC power`;
+  return `Next run: in ${timeLeft(next, now)} (${when(next)})`;
+}
+
+/** One cycle (`run`, and `retry` after a failure): preflight, then the update. The schedule counts from here. */
 export async function runCycle(deps: CycleDeps): Promise<number> {
+  const start = deps.now ?? new Date();
+  const cycle = {
+    lastCycle: start.toISOString(),
+    ...(deps.intervalDays ? { nextCycle: new Date(start.getTime() + deps.intervalDays * DAY_MS).toISOString() } : {}),
+  };
   const failure = await deps.preflight();
   const at = new Date().toISOString();
   if (failure) {
     await deps.state.update((s) => ({
       ...s,
+      ...cycle,
       preflight: { at, ok: false, failure },
       pending: { since: s.pending?.since ?? at, failure },
     }));
     deps.out(`Update skipped — ${failure.message}\n${CHOICE}\n`);
     return PREFLIGHT_FAILED;
   }
-  await deps.state.update((s) => ({ ...s, preflight: { at, ok: true }, pending: undefined }));
+  await deps.state.update((s) => ({ ...s, ...cycle, preflight: { at, ok: true }, pending: undefined }));
   return deps.update();
 }
 
@@ -49,6 +90,7 @@ export interface StatusExtras {
   /** The running system generation. */
   generation?: number;
   lastSwitch?: SwitchRecord;
+  now?: Date;
   /** A pending choice the user already dismissed (installed: the helper's state). */
   dismissedPending?: string;
 }
@@ -63,6 +105,7 @@ export async function status(state: StateStore, out: (text: string) => void, ext
   );
   if (s.pending && s.pending.since !== extras.dismissedPending) out(`Pending since ${s.pending.since}: ${s.pending.failure.message}\n${CHOICE}\n`);
   if (extras.generation !== undefined) out(`Generation: ${extras.generation}\n`);
+  out(`${nextRunLine(s, extras.now ?? new Date())}\n`);
   const r = s.lastRun;
   if (r) {
     out(`Last run: ${r.status} (${r.at})${r.branch ? ` ${r.branch}` : ""}${r.commit ? ` ${r.commit.slice(0, 12)}` : ""}${r.detail ? ` — ${r.detail}` : ""}\n`);

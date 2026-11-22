@@ -15,6 +15,9 @@ export interface RunState {
   /** A failed run waiting for the user's choice: retry now or wait for the next cycle. */
   pending?: { since: string; failure: PreflightFailure };
   lastRun?: RunRecord;
+  /** When the last cycle started (scheduled, manual or retry) and when the next is due: the schedule counts from the last one. */
+  lastCycle?: string;
+  nextCycle?: string;
   /** Branches main moved past; kept, never resumed. */
   superseded?: { branch: string; at: string }[];
   /** The last run for a user's revert request (`flake-agent revert <upstream-id>`). */
