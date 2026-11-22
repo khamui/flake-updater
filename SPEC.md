@@ -377,7 +377,7 @@ The change stays on its branch, the report marks it "needs review" with the guar
 
 ## Scheduling and secrets
 
-- Runs every `intervalDays` (7), counted from the last cycle however it started: a manual `flake-agent run` or a retry moves the next one. A systemd timer checks hourly (`Persistent=true`, `ConditionACPower=true`); `flake-agent status` shows the time left (`Next run: in 5 d 23 h 41 min (Sat 28 Nov, 14:05)`).
+- Runs every `intervalDays` (7), counted from the last cycle however it started: a manual `flake-agent run` or a retry moves the next one. A systemd timer checks hourly (`Persistent=true`, `ConditionACPower=true`); `flake-agent status` shows the time left (`Next run: in 5 d 23 h 41 min (Sat 28 Nov, 14:05)`). For the XFCE panel, `flake-agent status --panel` prints Generic Monitor markup: the time left (`<4d`, `<5h`, `<20m`), `rnng` during a run, `rvw` when the last run needs you, `rlbk` after a rollback, `bty` when due on battery.
 - One run at a time (lock file); run cancelled after 60 minutes
 - Claude subscription token from `claude setup-token`, stored as a root-owned file outside the Nix store and the repo, passed via `LoadCredential=`. No sops/agenix in v1.
 
