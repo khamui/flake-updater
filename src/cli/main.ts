@@ -16,7 +16,7 @@ import { DOC_HOSTS, githubRepos } from "../agent/hooks.js";
 import { fixLoop, runAgentSession } from "../agent/loop.js";
 import { captureKeepOld } from "../agent/keepold.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
-import { USER_REQUEST_DIR, decideMode, realDeps, switchService } from "../switch/switch.js";
+import { USER_REQUEST_DIR, decideMode, realDeps, switchService, type SwitchRecord } from "../switch/switch.js";
 import { prepareRevert } from "../revert/revert.js";
 import { parseNotes, readRevertRequest, removedFeature, upstreamRevertRun, writeRevertRequest } from "../revert/upstream.js";
 import { upstreamNotesPath } from "../report/upstream.js";
@@ -26,6 +26,8 @@ import { PREFERENCES } from "../guard/structure.js";
 import type { T3Snapshot } from "../probes/t3.js";
 import { readLastSwitch, realRollbackDeps, rollbackService } from "../switch/rollback.js";
 import { latestEvent } from "../report/report.js";
+import { panelMarkup } from "../report/panel.js";
+import { lockHolder, onAC } from "../preflight/environment.js";
 import { showChange } from "../report/show.js";
 import { realHelperDeps, tick, type HelperState } from "../helper/helper.js";
 
@@ -73,6 +75,7 @@ Commands:
   retry       After a failed preflight: preflight again, then run
   skip        Dismiss a failed run; wait for the next cycle
   status      Last run and its changes, generation, next run, last switch, preflight, pending choice
+              (--panel: one line for the XFCE Generic Monitor plugin: <4d, rnng, rvw, rlbk, bty)
   report      Show the latest report again (--once: only if not shown yet; the shell hook)
   show <id>   A change: upstream reason, affected keymaps/aliases, alternative, diff
   revert <id> Apply the change's keep-old.patch (or git revert it), build, probe, commit
@@ -152,6 +155,7 @@ async function main(argv: string[]): Promise<number> {
       "revert-request-dir": { type: "string" },
       yes: { type: "boolean", short: "y" },
       "if-due": { type: "boolean" },
+      panel: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -409,6 +413,7 @@ async function main(argv: string[]): Promise<number> {
           return 0;
         }
         if (command === "status") {
+          if (values.panel) return panel(new StateStore(AGENT_STATE), AGENT_STATE, await readLastSwitch(SWITCH_STATE), out);
           return status(new StateStore(AGENT_STATE), out, {
             generation: (await listGenerations(SYSTEM_PROFILE)).current,
             lastSwitch: await readLastSwitch(SWITCH_STATE),
@@ -418,6 +423,7 @@ async function main(argv: string[]): Promise<number> {
       }
       if (command === "skip") return skip(state, out);
       if (command === "status") {
+        if (values.panel) return panel(state, state.dir, values["switch-state-dir"] ? await readLastSwitch(values["switch-state-dir"]) : undefined, out);
         return status(state, out, values["switch-state-dir"] ? { lastSwitch: await readLastSwitch(values["switch-state-dir"]) } : {});
       }
       const cfg = await loadConfig(values.config, {
@@ -601,3 +607,14 @@ main(process.argv.slice(2)).then(
     process.exit(2);
   },
 );
+
+/** `status --panel`: the XFCE Generic Monitor plugin's markup; a click opens the report in a terminal. */
+async function panel(state: StateStore, stateDir: string, lastSwitch: SwitchRecord | undefined, out: (text: string) => void): Promise<number> {
+  out(
+    panelMarkup(
+      { state: await state.load(), lastSwitch, running: (await lockHolder(stateDir)) !== undefined, onAC: await onAC(), now: new Date() },
+      "xfce4-terminal --hold -x flake-agent report",
+    ),
+  );
+  return 0;
+}
