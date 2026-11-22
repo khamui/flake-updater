@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "bin": {
-    "flake-agent": "dist/cli/main.js"
+    "flake-agent": "dist/cli/bin.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

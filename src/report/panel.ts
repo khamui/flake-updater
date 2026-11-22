@@ -1,4 +1,4 @@
-import { nextRunLine } from "../preflight/cycle.js";
+import { nextRunLine } from "../preflight/schedule.js";
 import type { RunState } from "../preflight/state.js";
 import type { SwitchRecord } from "../switch/switch.js";
 

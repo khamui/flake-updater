@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { hostname, userInfo } from "node:os";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { configAttr, discoverPackages, type Target } from "../discovery/discover.js";
@@ -16,7 +16,7 @@ import { DOC_HOSTS, githubRepos } from "../agent/hooks.js";
 import { fixLoop, runAgentSession } from "../agent/loop.js";
 import { captureKeepOld } from "../agent/keepold.js";
 import { SYSTEM_PROFILE, collectGarbage, listGenerations } from "../switch/generations.js";
-import { USER_REQUEST_DIR, decideMode, realDeps, switchService, type SwitchRecord } from "../switch/switch.js";
+import { USER_REQUEST_DIR, decideMode, realDeps, switchService } from "../switch/switch.js";
 import { prepareRevert } from "../revert/revert.js";
 import { parseNotes, readRevertRequest, removedFeature, upstreamRevertRun, writeRevertRequest } from "../revert/upstream.js";
 import { upstreamNotesPath } from "../report/upstream.js";
@@ -26,12 +26,10 @@ import { PREFERENCES } from "../guard/structure.js";
 import type { T3Snapshot } from "../probes/t3.js";
 import { readLastSwitch, realRollbackDeps, rollbackService } from "../switch/rollback.js";
 import { latestEvent } from "../report/report.js";
-import { panelMarkup } from "../report/panel.js";
-import { lockHolder, onAC } from "../preflight/environment.js";
+import { AGENT_STATE, SWITCH_STATE, isInstalled, panelMain } from "./panel.js";
 import { showChange } from "../report/show.js";
 import { realHelperDeps, tick, type HelperState } from "../helper/helper.js";
 
-const AGENT_STATE = "/var/lib/flake-agent";
 /** Build a tree's system and snapshot it (ADR 0002: `show` and `revert` build both sides now). */
 function buildDeps(t: Target): BuildDeps {
   return {
@@ -51,17 +49,9 @@ function buildDeps(t: Target): BuildDeps {
 
 /** The module's agent config, for the user's own commands (revert). */
 const ETC_CONFIG = "/etc/flake-agent/config.json";
-const SWITCH_STATE = "/var/lib/flake-agent-switch";
 /** The user's own state: what the helper notified, dismissed and handed off. */
 const HELPER_STATE = () => join(defaultStateDir(), "helper.json");
 const readHelperState = async () => JSON.parse(await readFile(HELPER_STATE(), "utf8").catch(() => "{}")) as HelperState;
-
-/** Is the NixOS module enabled on this system? */
-const isInstalled = () =>
-  access("/etc/systemd/system/flake-agent.service").then(
-    () => true,
-    () => false,
-  );
 
 const HELP = `Usage: flake-agent <command> [options]
 
@@ -413,7 +403,7 @@ async function main(argv: string[]): Promise<number> {
           return 0;
         }
         if (command === "status") {
-          if (values.panel) return panel(new StateStore(AGENT_STATE), AGENT_STATE, await readLastSwitch(SWITCH_STATE), out);
+          if (values.panel) return panelMain(argv, out);
           return status(new StateStore(AGENT_STATE), out, {
             generation: (await listGenerations(SYSTEM_PROFILE)).current,
             lastSwitch: await readLastSwitch(SWITCH_STATE),
@@ -423,7 +413,7 @@ async function main(argv: string[]): Promise<number> {
       }
       if (command === "skip") return skip(state, out);
       if (command === "status") {
-        if (values.panel) return panel(state, state.dir, values["switch-state-dir"] ? await readLastSwitch(values["switch-state-dir"]) : undefined, out);
+        if (values.panel) return panelMain(argv, out);
         return status(state, out, values["switch-state-dir"] ? { lastSwitch: await readLastSwitch(values["switch-state-dir"]) } : {});
       }
       const cfg = await loadConfig(values.config, {
@@ -607,14 +597,3 @@ main(process.argv.slice(2)).then(
     process.exit(2);
   },
 );
-
-/** `status --panel`: the XFCE Generic Monitor plugin's markup; a click opens the report in a terminal. */
-async function panel(state: StateStore, stateDir: string, lastSwitch: SwitchRecord | undefined, out: (text: string) => void): Promise<number> {
-  out(
-    panelMarkup(
-      { state: await state.load(), lastSwitch, running: (await lockHolder(stateDir)) !== undefined, onAC: await onAC(), now: new Date() },
-      "xfce4-terminal --hold -x flake-agent report",
-    ),
-  );
-  return 0;
-}

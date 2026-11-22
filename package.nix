@@ -21,6 +21,8 @@ buildNpmPackage {
       ./package.json
       ./package-lock.json
       ./tsconfig.json
+      # only test/unit: the injection suites need nix and a fixture
+      ./vitest.config.ts
       ./src
       ./test
     ];
