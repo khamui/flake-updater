@@ -9,6 +9,11 @@
   diffutils,
   bubblewrap,
   xvfb,
+  bash,
+  coreutils,
+  gnugrep,
+  gnused,
+  findutils,
   claude-code,
 }:
 buildNpmPackage {
@@ -46,7 +51,9 @@ buildNpmPackage {
     # the SDK's prebuilt Claude Code binary doesn't run on NixOS; nixpkgs' claude-code is used instead
     rm -rf $out/lib/node_modules/flake-agent/node_modules/@anthropic-ai/claude-agent-sdk-*
     wrapProgram $out/bin/flake-agent \
-      --prefix PATH : ${lib.makeBinPath [nvd git gnutar diffutils bubblewrap xvfb]} \
+      --prefix PATH : ${lib.makeBinPath [nvd git gnutar diffutils bubblewrap xvfb bash coreutils gnugrep gnused findutils]} \
+      `# the agent user's login shell is nologin; agent sessions get bash` \
+      --set-default FLAKE_AGENT_SHELL ${lib.getExe bash} \
       --set-default FLAKE_AGENT_CLAUDE ${lib.getExe claude-code} \
       `# the agent runs flake-agent keep-old from its sessions` \
       --prefix PATH : $out/bin
