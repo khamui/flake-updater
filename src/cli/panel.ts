@@ -34,7 +34,7 @@ export async function panelMain(argv: string[], out: (text: string) => void = (t
         onAC: await onAC(),
         now: new Date(),
       },
-      "xfce4-terminal --hold -x flake-agent report",
+      "alacritty --hold -e flake-agent report",
     ),
   );
   return 0;

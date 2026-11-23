@@ -50,7 +50,7 @@ describe("panelText", () => {
 
 describe("panelMarkup", () => {
   it("escapes the text for the plugin's markup and adds tooltip and click", () => {
-    const m = panelMarkup(p({ state: { nextCycle: at(3.5 * 24 * H), lastRun: run("green") } }), "xfce4-terminal --hold -x flake-agent report");
-    expect(m).toMatch(/^<txt>&lt;4d<\/txt><tool>flake-agent\nNext run: in 3 d 12 h \(.+\)\nLast run: green \(2026-11-22 08:00\)<\/tool><txtclick>xfce4-terminal --hold -x flake-agent report<\/txtclick>\n$/);
+    const m = panelMarkup(p({ state: { nextCycle: at(3.5 * 24 * H), lastRun: run("green") } }), "alacritty --hold -e flake-agent report");
+    expect(m).toMatch(/^<txt>&lt;4d<\/txt><tool>flake-agent\nNext run: in 3 d 12 h \(.+\)\nLast run: green \(2026-11-22 08:00\)<\/tool><txtclick>alacritty --hold -e flake-agent report<\/txtclick>\n$/);
   });
 });
