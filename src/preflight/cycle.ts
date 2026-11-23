@@ -63,6 +63,8 @@ export interface StatusExtras {
   now?: Date;
   /** A pending choice the user already dismissed (installed: the helper's state). */
   dismissedPending?: string;
+  /** The last switch's guard block is handled: its changes are on main. */
+  reviewHandled?: boolean;
 }
 
 export async function status(state: StateStore, out: (text: string) => void, extras: StatusExtras = {}): Promise<number> {
@@ -84,9 +86,10 @@ export async function status(state: StateStore, out: (text: string) => void, ext
   }
   const sw = extras.lastSwitch;
   if (sw) {
-    const result = sw.rolledBack ? `rolled back — ${sw.rolledBack.reason}` : sw.result === "switched" ? `${sw.mode ?? "switch"}, generation ${sw.from} → ${sw.to}` : sw.result;
+    const handled = sw.result === "needs-review" && extras.reviewHandled;
+    const result = sw.rolledBack ? `rolled back — ${sw.rolledBack.reason}` : sw.result === "switched" ? `${sw.mode ?? "switch"}, generation ${sw.from} → ${sw.to}` : handled ? "needs-review, handled: its changes are on main" : sw.result;
     out(`Last switch: ${result} (${sw.at}) ${sw.branch} ${sw.commit.slice(0, 12)}\n`);
-    if (sw.result === "needs-review") for (const reason of sw.reasons ?? []) out(`  ⛔ guard: ${reason}\n`);
+    if (sw.result === "needs-review" && !handled) for (const reason of sw.reasons ?? []) out(`  ⛔ guard: ${reason}\n`);
   }
   // a green run the switch service hasn't handled yet
   if (r?.status === "green" && r.commit && sw?.commit !== r.commit) out(`Waiting to switch: ${r.commit.slice(0, 12)} (idle or next boot)\n`);

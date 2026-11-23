@@ -26,7 +26,8 @@ import { PREFERENCES } from "../guard/structure.js";
 import type { T3Snapshot } from "../probes/t3.js";
 import { readLastSwitch, realRollbackDeps, rollbackService } from "../switch/rollback.js";
 import { latestEvent } from "../report/report.js";
-import { AGENT_STATE, SWITCH_STATE, isInstalled, panelMain } from "./panel.js";
+import { AGENT_STATE, ETC_CONFIG, SWITCH_STATE, installedRepo, isInstalled, panelMain } from "./panel.js";
+import { reviewHandledIn } from "../report/review.js";
 import { showChange } from "../report/show.js";
 import { realHelperDeps, tick, type HelperState } from "../helper/helper.js";
 
@@ -48,7 +49,6 @@ function buildDeps(t: Target): BuildDeps {
 }
 
 /** The module's agent config, for the user's own commands (revert). */
-const ETC_CONFIG = "/etc/flake-agent/config.json";
 /** The user's own state: what the helper notified, dismissed and handed off. */
 const HELPER_STATE = () => join(defaultStateDir(), "helper.json");
 const readHelperState = async () => JSON.parse(await readFile(HELPER_STATE(), "utf8").catch(() => "{}")) as HelperState;
@@ -251,7 +251,9 @@ async function main(argv: string[]): Promise<number> {
       const state = await new StateStore(agentState).load();
       if (state.pending?.since === helper.dismissedPending) delete state.pending;
       const rec = await readLastSwitch(switchState);
-      const event = latestEvent(state, rec, rec && helper.handoff?.commit === rec.commit ? helper.handoff.note : undefined);
+      // installed: is a guard block handled in the user's repo?
+      const handled = !values["state-dir"] && (await isInstalled()) ? await reviewHandledIn(await installedRepo(), state.lastRun, rec) : false;
+      const event = latestEvent(state, rec, rec && helper.handoff?.commit === rec.commit ? helper.handoff.note : undefined, handled);
       const seenFile = join(defaultStateDir(), "report-seen");
       // every key shown, newest last: dismissing a newer event must not bring an older report back
       const seen = (await readFile(seenFile, "utf8").catch(() => "")).split("\n").filter(Boolean);
@@ -404,9 +406,12 @@ async function main(argv: string[]): Promise<number> {
         }
         if (command === "status") {
           if (values.panel) return panelMain(argv, out);
-          return status(new StateStore(AGENT_STATE), out, {
+          const agentStore = new StateStore(AGENT_STATE);
+          const lastSwitch = await readLastSwitch(SWITCH_STATE);
+          return status(agentStore, out, {
             generation: (await listGenerations(SYSTEM_PROFILE)).current,
-            lastSwitch: await readLastSwitch(SWITCH_STATE),
+            lastSwitch,
+            reviewHandled: await reviewHandledIn(await installedRepo(), (await agentStore.load()).lastRun, lastSwitch),
             dismissedPending: (await readHelperState()).dismissedPending,
           });
         }
