@@ -10,6 +10,8 @@ export interface PanelState {
   running: boolean;
   onAC: boolean;
   now: Date;
+  /** The last switch's guard block is handled: its changes are on main. */
+  reviewHandled?: boolean;
 }
 
 const NEEDS_YOU = ["blocked", "build-failed", "probes-red"];
@@ -25,7 +27,8 @@ export function countdown(to: Date, now: Date): string {
 
 /**
  * rnng: a run is going. rlbk / rvw: the last run's switch was rolled back, or
- * the run or the guard left it for you (until the next run). bty: due, but on
+ * the run or the guard left it for you (until the next run, or a guard block's
+ * changes are on main). bty: due, but on
  * battery. Otherwise the time left; a due run starts within the hour.
  */
 export function panelText(p: PanelState): string {
@@ -37,7 +40,8 @@ export function panelText(p: PanelState): string {
   const due = !next || next <= p.now;
   const left = due ? "<1h" : countdown(next, p.now);
   if (sw && (sw.rolledBack || sw.result === "activation-failed")) return `rlbk ${left}`;
-  if ((run && NEEDS_YOU.includes(run.status)) || (sw && ["needs-review", "build-failed", "error"].includes(sw.result))) return `rvw ${left}`;
+  const swNeedsYou = sw && (sw.result === "needs-review" ? !p.reviewHandled : ["build-failed", "error"].includes(sw.result));
+  if ((run && NEEDS_YOU.includes(run.status)) || swNeedsYou) return `rvw ${left}`;
   if (due && !p.onAC) return "bty";
   return left;
 }
@@ -51,7 +55,7 @@ export function panelMarkup(p: PanelState, click: string): string {
     "flake-agent",
     nextRunLine(p.state, p.now),
     run ? `Last run: ${run.status} (${run.at.slice(0, 16).replace("T", " ")})` : "Last run: none yet",
-    ...(p.lastSwitch ? [`Last switch: ${p.lastSwitch.rolledBack ? "rolled back" : p.lastSwitch.result} (${p.lastSwitch.at.slice(0, 16).replace("T", " ")})`] : []),
+    ...(p.lastSwitch ? [`Last switch: ${p.lastSwitch.rolledBack ? "rolled back" : p.lastSwitch.result}${p.lastSwitch.result === "needs-review" && p.reviewHandled ? ", handled" : ""} (${p.lastSwitch.at.slice(0, 16).replace("T", " ")})`] : []),
     ...(p.state.pending ? [`Pending: ${p.state.pending.failure.message}`] : []),
   ];
   return `<txt>${escape(panelText(p))}</txt><tool>${escape(tool.join("\n"))}</tool><txtclick>${escape(click)}</txtclick>\n`;

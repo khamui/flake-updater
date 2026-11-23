@@ -65,7 +65,7 @@ function summaryLine(run: RunRecord): string {
 }
 
 /** The report for a switch the switch service recorded for this run. */
-function switchReport(run: RunRecord | undefined, rec: SwitchRecord, handoffNote?: string): string {
+function switchReport(run: RunRecord | undefined, rec: SwitchRecord, handoffNote?: string, reviewHandled = false): string {
   const head = (() => {
     const when = day(rec.at);
     if (rec.rolledBack) return `Update rolled back (${when}): ${rec.rolledBack.reason}\nGeneration ${rec.to} → ${rec.from}`;
@@ -75,6 +75,7 @@ function switchReport(run: RunRecord | undefined, rec: SwitchRecord, handoffNote
           ? `Update ready (${when}): applies on next reboot, generation ${rec.from} → ${rec.to}${rec.idleFallback ? " (not idle within 24 h)" : ""}`
           : `System updated (${when}), generation ${rec.from} → ${rec.to}`;
       case "needs-review":
+        if (reviewHandled) return `Update needed review (${when}): handled, its changes are on main`;
         return `Update needs review (${when}): the guard blocked ${rec.commit.slice(0, 12)}\n${(rec.reasons ?? []).map((r) => `  guard: ${r}`).join("\n")}`;
       default:
         return `Update failed (${when}): ${rec.result}${rec.detail ? ` — ${rec.detail.split("\n")[0]}` : ""}`;
@@ -83,7 +84,7 @@ function switchReport(run: RunRecord | undefined, rec: SwitchRecord, handoffNote
   const lines = [head];
   if (run) lines.push(summaryLine(run), "", ...body(run));
   if (rec.branch.startsWith("agent/revert-")) lines.push(`  ↩ reverted ${rec.branch.replace(/^agent\/revert-/, "")} (flake-agent revert)`);
-  if (rec.result === "needs-review" || rec.rolledBack) lines.push("", `  Branch:   ${rec.branch}`);
+  if ((rec.result === "needs-review" && !reviewHandled) || rec.rolledBack) lines.push("", `  Branch:   ${rec.branch}`);
   if (handoffNote && rec.result === "switched" && !rec.rolledBack) lines.push("", `  Repo:     ${handoffNote}`);
   return lines.join("\n") + "\n";
 }
@@ -109,7 +110,7 @@ export interface ReportEvent {
  * that ended without a switch, or what the switch service did with the run.
  * A green run whose switch hasn't happened yet has nothing to report.
  */
-export function latestEvent(state: RunState, rec: SwitchRecord | undefined, handoffNote?: string): ReportEvent | undefined {
+export function latestEvent(state: RunState, rec: SwitchRecord | undefined, handoffNote?: string, reviewHandled = false): ReportEvent | undefined {
   const events: (ReportEvent & { at: string })[] = [];
   if (state.pending) {
     events.push({
@@ -132,7 +133,7 @@ export function latestEvent(state: RunState, rec: SwitchRecord | undefined, hand
   if (rec && rec.result !== "dry-run") {
     const forRun = run?.commit === rec.commit ? run : undefined;
     const at = rec.rolledBack?.at ?? rec.at;
-    events.push({ at, key: `switch:${rec.at}${rec.rolledBack ? `:rollback:${rec.rolledBack.at}` : ""}`, text: switchReport(forRun, rec, handoffNote) });
+    events.push({ at, key: `switch:${rec.at}${rec.rolledBack ? `:rollback:${rec.rolledBack.at}` : ""}`, text: switchReport(forRun, rec, handoffNote, reviewHandled) });
   }
   return events.sort((a, b) => a.at.localeCompare(b.at)).at(-1);
 }

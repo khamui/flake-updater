@@ -41,6 +41,14 @@ describe("panelText", () => {
     expect(panelText(p({ state: { nextCycle: at(3.5 * 24 * H), lastRun: run("green") }, lastSwitch: sw({ result: "activation-failed" }) }))).toBe("rlbk <4d");
   });
 
+  it("drops rvw once the blocked changes are on main", () => {
+    const blocked = { state: { nextCycle: at(3.5 * 24 * H), lastRun: run("green") }, lastSwitch: sw({ result: "needs-review" }) };
+    expect(panelText(p({ ...blocked, reviewHandled: true }))).toBe("<4d");
+    expect(panelText(p({ ...blocked, reviewHandled: false }))).toBe("rvw <4d");
+    // a blocked run is not a switch the user can merge away
+    expect(panelText(p({ state: { nextCycle: at(3.5 * 24 * H), lastRun: run("blocked") }, reviewHandled: true }))).toBe("rvw <4d");
+  });
+
   it("bty when due on battery; due on AC starts within the hour", () => {
     expect(panelText(p({ state: { nextCycle: at(-H) }, onAC: false }))).toBe("bty");
     expect(panelText(p({ state: { nextCycle: at(-H) } }))).toBe("<1h");

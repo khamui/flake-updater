@@ -102,6 +102,16 @@ describe("report", () => {
     const pending: RunState = { ...state, pending: { since: "2026-11-27T03:00:00.000Z", failure: { reason: "quota", message: "Quota exhausted" } } };
     expect(latestEvent(pending, switched)!.text).toContain("Update skipped — Quota exhausted");
   });
+
+  it("says a guard block is handled once its changes are on main", () => {
+    const review: SwitchRecord = { ...switched, result: "needs-review", reasons: ["hash: outputHash changed"] };
+    const e = latestEvent({ lastRun: run }, review, undefined, true)!;
+    // the same event: the shell hook doesn't show it again
+    expect(e.key).toBe(latestEvent({ lastRun: run }, review)!.key);
+    expect(e.text).toMatch(/^Update needed review \(2026-11-25\): handled, its changes are on main\n/);
+    expect(e.text).not.toContain("guard:");
+    expect(e.text).not.toContain("Branch:");
+  });
 });
 
 describe("CHANGES.md", () => {
@@ -140,6 +150,16 @@ describe("status", () => {
     expect(text).toContain("Last switch: needs-review");
     expect(text).toContain("⛔ guard: hash: outputHash changed");
     expect(text).toContain("⚠ upstream upstream-binary-removed-system-logoutd-2026-11  binary-removed system/logoutd: shadow-4.19.4");
+  });
+
+  it("says a guard block is handled once its changes are on main", async () => {
+    const state = new StateStore(await mkdtemp(join(tmpdir(), "status-")));
+    await state.save({ lastRun: run });
+    const out: string[] = [];
+    await status(state, (t) => out.push(t), { lastSwitch: { ...switched, result: "needs-review", reasons: ["hash: outputHash changed"] }, reviewHandled: true });
+    const text = out.join("");
+    expect(text).toContain("Last switch: needs-review, handled: its changes are on main (");
+    expect(text).not.toContain("⛔ guard:");
   });
 });
 
